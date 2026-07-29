@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node \"/absolute/path/to/claude-statusline/statusline.js\"",
+    "padding": 0
+  }
+}
