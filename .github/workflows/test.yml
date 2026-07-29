@@ -1,0 +1,40 @@
+name: test
+
+# The suite shells out to real git in temporary repositories and renders paths
+# through the platform's own separators, so it is as much a platform test as a
+# unit test. Every OS the status line runs on gets a job: a Windows-only failure
+# went unnoticed once already.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the others — that is exactly how a
+      # platform-specific break stays hidden.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The README's stated minimum, the active LTS, and current.
+        node: ['18', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      # Recorded per job: the git segment needs 2.15+ for --no-optional-locks,
+      # and a runner image bump is the likeliest cause of a sudden git failure.
+      - name: Versions
+        run: node --version
+      - run: git --version
+
+      - name: Tests
+        run: node test/run.js

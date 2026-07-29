@@ -1,5 +1,7 @@
 # claude-statusline
 
+[![test](https://github.com/yawning5/claude-statusline/actions/workflows/test.yml/badge.svg)](https://github.com/yawning5/claude-statusline/actions/workflows/test.yml)
+
 A single-line status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
 
 ```
@@ -122,13 +124,18 @@ terminal. `test/run.js` has a regression test for exactly this.
 node test/run.js
 ```
 
-43 checks covering percentage rounding, the reset countdown, path shortening, malformed
+46 checks covering percentage rounding, the reset countdown, path shortening, malformed
 input, every colour and glyph switch, and the git segment against real temporary
 repositories — ahead, behind, diverged, dirty, detached HEAD, no upstream, and a repo with
 no commits yet.
 
 Fixtures carry no absolute timestamps. Countdown cases build `resets_at` relative to the
 current time so they do not rot.
+
+CI runs the same command on Linux, macOS and Windows across Node 18, 22 and 24. The suite
+drives real git and real path separators, so a platform-specific break is a realistic
+failure mode rather than a theoretical one — `fail-fast` is off so one platform going red
+does not hide the rest.
 
 `statusline.js` reads Claude Code's session JSON on stdin. To see the real payload:
 
