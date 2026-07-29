@@ -447,6 +447,92 @@ check('long branch names are truncated', () => {
   if (!branch.endsWith('…')) throw new Error(`expected an ellipsis, got ${JSON.stringify(branch)}`);
 });
 
+// --- installer merge --------------------------------------------------------
+
+// Both installers delegate to merge-settings.js, so the promise "your other
+// settings are left alone" is tested in one place.
+const MERGE = path.join(ROOT, 'merge-settings.js');
+
+// Nested as deeply as a real settings.json gets. PowerShell's ConvertTo-Json
+// flattens anything past depth 2 into "@{hooks=System.Object[]}", which is why
+// the merge is Node rather than a reimplementation per platform.
+const EXISTING = {
+  theme: 'dark',
+  env: { GIT_AUTHOR_NAME: 'someone' },
+  hooks: {
+    PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo hi' }] }],
+  },
+  statusLine: { type: 'command', command: 'node /old/path.js', padding: 0 },
+};
+
+function mergeInto(contents, name) {
+  const file = path.join(TMP, `${name}.json`);
+  if (contents !== null) fs.writeFileSync(file, contents);
+  const res = execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return { file, out: res, json: JSON.parse(fs.readFileSync(file, 'utf8')) };
+}
+
+check('the merge writes the statusLine command', () => {
+  const { json } = mergeInto('{}', 'merge-empty');
+  eq(json.statusLine.command, 'node "/repo/statusline.js"', 'statusLine command');
+  eq(json.statusLine.type, 'command', 'statusLine type');
+  eq(json.statusLine.padding, 0, 'statusLine padding');
+});
+
+check('the merge keeps unrelated settings, nesting and all', () => {
+  const { json } = mergeInto(JSON.stringify(EXISTING, null, 2), 'merge-existing');
+  eq(json.theme, 'dark', 'theme');
+  eq(json.env.GIT_AUTHOR_NAME, 'someone', 'env value');
+  eq(json.hooks.PreToolUse[0].hooks[0].command, 'echo hi', 'deeply nested hook command');
+  eq(json.hooks.PreToolUse[0].matcher, 'Bash', 'hook matcher');
+});
+
+check('the merge replaces an existing statusLine', () => {
+  const { json } = mergeInto(JSON.stringify(EXISTING), 'merge-replace');
+  eq(json.statusLine.command, 'node "/repo/statusline.js"', 'statusLine command');
+});
+
+check('the merge creates a settings file that is not there yet', () => {
+  const { json } = mergeInto(null, 'merge-absent');
+  eq(json.statusLine.command, 'node "/repo/statusline.js"', 'statusLine command');
+});
+
+check('the merge refuses invalid JSON and leaves the file untouched', () => {
+  const file = path.join(TMP, 'merge-broken.json');
+  const before = '{ "theme": "dark",,,';
+  fs.writeFileSync(file, before);
+  let status = 0;
+  try {
+    execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    status = e.status;
+  }
+  eq(status, 1, 'exit status');
+  eq(fs.readFileSync(file, 'utf8'), before, 'file contents');
+});
+
+check('the merge refuses a JSON file that is not an object', () => {
+  const file = path.join(TMP, 'merge-array.json');
+  fs.writeFileSync(file, '[1, 2, 3]');
+  let status = 0;
+  try {
+    execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    status = e.status;
+  }
+  eq(status, 1, 'exit status');
+  eq(fs.readFileSync(file, 'utf8'), '[1, 2, 3]', 'file contents');
+});
+
 // --- report -----------------------------------------------------------------
 
 fs.rmSync(TMP, { recursive: true, force: true });

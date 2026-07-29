@@ -38,3 +38,34 @@ jobs:
 
       - name: Tests
         run: node test/run.js
+
+      # The installers touch a real settings.json, so they get a real run against
+      # a throwaway CLAUDE_CONFIG_DIR. Silently mangling someone's settings is
+      # the worst thing this repo could do, and unit tests cover only the merge.
+      - name: install.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-sh"
+          bash install.sh
+          grep -q '"statusLine"' "$CLAUDE_CONFIG_DIR/settings.json"
+          grep -q 'statusline.js' "$CLAUDE_CONFIG_DIR/settings.json"
+
+      - name: install.ps1 (pwsh 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CLAUDE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'claude-pwsh'
+          ./install.ps1
+          $s = Get-Content (Join-Path $env:CLAUDE_CONFIG_DIR 'settings.json') -Raw | ConvertFrom-Json
+          if ($s.statusLine.command -notlike '*statusline.js*') { throw "statusLine missing: $($s | ConvertTo-Json -Depth 100)" }
+
+      # Windows PowerShell 5.1 is what a stock Windows box actually has.
+      - name: install.ps1 (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:CLAUDE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'claude-ps51'
+          ./install.ps1
+          $s = Get-Content (Join-Path $env:CLAUDE_CONFIG_DIR 'settings.json') -Raw | ConvertFrom-Json
+          if ($s.statusLine.command -notlike '*statusline.js*') { throw 'statusLine missing' }

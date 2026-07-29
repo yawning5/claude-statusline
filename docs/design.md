@@ -118,6 +118,24 @@ Tests for this build native-shaped paths (`C:\home\me` on Windows, `/home/me` el
 A POSIX-looking literal is not enough: `path.resolve()` rewrites it to `C:\…` on Windows,
 which made an earlier draft of these cases pass there without exercising anything.
 
+## Installers
+
+There are two — `install.sh` and `install.ps1` — but one merge. Both call
+`merge-settings.js`, which reads the existing `settings.json`, sets the `statusLine` key and
+writes the rest back untouched.
+
+Reimplementing the merge in PowerShell was rejected. `ConvertTo-Json` defaults to a depth of
+2 and silently flattens everything below it, so a settings file with a `hooks` block comes
+back out as `"@{hooks=System.Object[]}"`. `-Depth` fixes that, but the failure is quiet, the
+blast radius is somebody's entire configuration, and Node is already a hard requirement for
+the status line itself.
+
+`install.sh` converts the repo path with `cygpath -m` when it is available. Under Git Bash
+the path is `/c/...`, which is meaningless to the `cmd.exe` that may end up running the
+command. MSYS does convert arguments on their way to a native program, so the written path
+was already correct by accident — but the path *printed* by the installer was not the one
+written, which is exactly the sort of thing that wastes an afternoon.
+
 ## Rejected
 
 - **Parent-branch commit counts** — extra git calls per render, and the parent has to be
