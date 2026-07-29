@@ -235,6 +235,30 @@ check('paths under home collapse to ~', () => {
   eq(segments(out)[0], '~', 'path segment');
 });
 
+// os.homedir() reads USERPROFILE on Windows and HOME everywhere else, so these
+// set both to drive it from the test.
+const withHome = (home, cwd) =>
+  segments(render({ workspace: { current_dir: cwd } }, { HOME: home, USERPROFILE: home }))[0];
+
+// Native-shaped absolute paths. A POSIX-looking path would make these cases
+// vacuous on Windows: they have to be paths the platform really produces.
+const SEP = process.platform === 'win32' ? '\\' : '/';
+const abs = (...segs) => (process.platform === 'win32' ? 'C:\\' : '/') + segs.join(SEP);
+const HOME = abs('home', 'me');
+
+check('a directory under home collapses to ~', () => {
+  eq(withHome(HOME, abs('home', 'me', 'proj')), '~/proj', 'path segment');
+});
+
+check('a sibling that merely starts with the home path is left alone', () => {
+  const cwd = abs('home', 'me-other', 'proj');
+  eq(withHome(HOME, cwd), cwd.replace(/\\/g, '/'), 'path segment');
+});
+
+check('a trailing separator on home does not eat a character', () => {
+  eq(withHome(HOME + SEP, abs('home', 'me', 'proj')), '~/proj', 'path segment');
+});
+
 // --- malformed input --------------------------------------------------------
 
 check('empty stdin does not crash', () => {
