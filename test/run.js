@@ -63,9 +63,17 @@ const fixture = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, `${name
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'statusline-test-'));
 
+// An empty regular file rather than os.devNull. On Windows os.devNull is
+// `\\.\nul`, which git-for-windows will not open as a config file -- it dies
+// with `unable to access '//./nul': Invalid argument`, so every git scenario
+// below fails at `git init`. An empty file isolates these repos from the
+// developer's own git config just as well, and does it on every platform.
+const EMPTY_GITCONFIG = path.join(TMP, 'empty.gitconfig');
+fs.writeFileSync(EMPTY_GITCONFIG, '');
+
 const GIT_ENV = Object.assign({}, process.env, {
-  GIT_CONFIG_GLOBAL: os.devNull,
-  GIT_CONFIG_SYSTEM: os.devNull,
+  GIT_CONFIG_GLOBAL: EMPTY_GITCONFIG,
+  GIT_CONFIG_SYSTEM: EMPTY_GITCONFIG,
   GIT_AUTHOR_NAME: 'test',
   GIT_AUTHOR_EMAIL: 'test@example.com',
   GIT_COMMITTER_NAME: 'test',
