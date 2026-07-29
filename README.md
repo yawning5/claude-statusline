@@ -11,18 +11,53 @@ On a subscription the API-equivalent cost is not what constrains you, so this sh
 
 ## Install
 
+Requires Node 18+, which Claude Code already depends on. Nothing else.
+
 ```sh
-git clone <this-repo> ~/claude-statusline
-~/claude-statusline/install.sh
+git clone https://github.com/yawning5/claude-statusline.git ~/claude-statusline
+bash ~/claude-statusline/install.sh
 ```
 
-`install.sh` merges the `statusLine` key into `~/.claude/settings.json` and backs up the
-existing file first. Your other settings are left alone. Start a new session to pick it up.
+Then start a new Claude Code session, or run `/statusline`, to pick it up.
 
-To wire it up by hand instead, copy the `statusLine` block from `settings.example.json`
-into `~/.claude/settings.json` and replace the path.
+`install.sh` merges the `statusLine` key into `~/.claude/settings.json` and backs the file
+up first. Your other settings — theme, model, plugins — are left alone.
 
-Requires Node 18+, which Claude Code already depends on.
+Run it with `bash` rather than `./install.sh`: downloading a ZIP or uploading through the
+GitHub web UI drops the executable bit, and `bash` works either way. If you would rather
+have it back:
+
+```sh
+chmod +x ~/claude-statusline/install.sh ~/claude-statusline/statusline.js
+```
+
+### By hand
+
+If you would rather not run a script, copy the `statusLine` block from
+`settings.example.json` into `~/.claude/settings.json` and put your own absolute path in it:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node \"/home/you/claude-statusline/statusline.js\"",
+    "padding": 0
+  }
+}
+```
+
+Merge that key into the existing file — do not replace the whole thing, or you will drop
+your other settings. Use double quotes around the path so the command also works when
+`cmd.exe` runs it.
+
+### Check it works
+
+```sh
+echo '{}' | node ~/claude-statusline/statusline.js
+```
+
+That should print a status line for your current directory. If it prints nothing, Node is
+not on your `PATH` where Claude Code can see it.
 
 ## What each segment means
 
