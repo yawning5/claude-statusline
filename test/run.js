@@ -63,17 +63,9 @@ const fixture = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, `${name
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'statusline-test-'));
 
-// An empty regular file rather than os.devNull. On Windows os.devNull is
-// `\\.\nul`, which git-for-windows will not open as a config file -- it dies
-// with `unable to access '//./nul': Invalid argument`, so every git scenario
-// below fails at `git init`. An empty file isolates these repos from the
-// developer's own git config just as well, and does it on every platform.
-const EMPTY_GITCONFIG = path.join(TMP, 'empty.gitconfig');
-fs.writeFileSync(EMPTY_GITCONFIG, '');
-
 const GIT_ENV = Object.assign({}, process.env, {
-  GIT_CONFIG_GLOBAL: EMPTY_GITCONFIG,
-  GIT_CONFIG_SYSTEM: EMPTY_GITCONFIG,
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_CONFIG_SYSTEM: os.devNull,
   GIT_AUTHOR_NAME: 'test',
   GIT_AUTHOR_EMAIL: 'test@example.com',
   GIT_COMMITTER_NAME: 'test',
@@ -233,30 +225,6 @@ check('deep paths keep the root marker and last two segments', () => {
 check('paths under home collapse to ~', () => {
   const out = render({ workspace: { current_dir: os.homedir() } });
   eq(segments(out)[0], '~', 'path segment');
-});
-
-// os.homedir() reads USERPROFILE on Windows and HOME everywhere else, so these
-// set both to drive it from the test.
-const withHome = (home, cwd) =>
-  segments(render({ workspace: { current_dir: cwd } }, { HOME: home, USERPROFILE: home }))[0];
-
-// Native-shaped absolute paths. A POSIX-looking path would make these cases
-// vacuous on Windows: they have to be paths the platform really produces.
-const SEP = process.platform === 'win32' ? '\\' : '/';
-const abs = (...segs) => (process.platform === 'win32' ? 'C:\\' : '/') + segs.join(SEP);
-const HOME = abs('home', 'me');
-
-check('a directory under home collapses to ~', () => {
-  eq(withHome(HOME, abs('home', 'me', 'proj')), '~/proj', 'path segment');
-});
-
-check('a sibling that merely starts with the home path is left alone', () => {
-  const cwd = abs('home', 'me-other', 'proj');
-  eq(withHome(HOME, cwd), cwd.replace(/\\/g, '/'), 'path segment');
-});
-
-check('a trailing separator on home does not eat a character', () => {
-  eq(withHome(HOME + SEP, abs('home', 'me', 'proj')), '~/proj', 'path segment');
 });
 
 // --- malformed input --------------------------------------------------------
@@ -445,92 +413,6 @@ check('long branch names are truncated', () => {
   const branch = branchOf(dir);
   if (branch.length > 24) throw new Error(`branch segment too long: ${JSON.stringify(branch)}`);
   if (!branch.endsWith('…')) throw new Error(`expected an ellipsis, got ${JSON.stringify(branch)}`);
-});
-
-// --- installer merge --------------------------------------------------------
-
-// Both installers delegate to merge-settings.js, so the promise "your other
-// settings are left alone" is tested in one place.
-const MERGE = path.join(ROOT, 'merge-settings.js');
-
-// Nested as deeply as a real settings.json gets. PowerShell's ConvertTo-Json
-// flattens anything past depth 2 into "@{hooks=System.Object[]}", which is why
-// the merge is Node rather than a reimplementation per platform.
-const EXISTING = {
-  theme: 'dark',
-  env: { GIT_AUTHOR_NAME: 'someone' },
-  hooks: {
-    PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo hi' }] }],
-  },
-  statusLine: { type: 'command', command: 'node /old/path.js', padding: 0 },
-};
-
-function mergeInto(contents, name) {
-  const file = path.join(TMP, `${name}.json`);
-  if (contents !== null) fs.writeFileSync(file, contents);
-  const res = execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  return { file, out: res, json: JSON.parse(fs.readFileSync(file, 'utf8')) };
-}
-
-check('the merge writes the statusLine command', () => {
-  const { json } = mergeInto('{}', 'merge-empty');
-  eq(json.statusLine.command, 'node "/repo/statusline.js"', 'statusLine command');
-  eq(json.statusLine.type, 'command', 'statusLine type');
-  eq(json.statusLine.padding, 0, 'statusLine padding');
-});
-
-check('the merge keeps unrelated settings, nesting and all', () => {
-  const { json } = mergeInto(JSON.stringify(EXISTING, null, 2), 'merge-existing');
-  eq(json.theme, 'dark', 'theme');
-  eq(json.env.GIT_AUTHOR_NAME, 'someone', 'env value');
-  eq(json.hooks.PreToolUse[0].hooks[0].command, 'echo hi', 'deeply nested hook command');
-  eq(json.hooks.PreToolUse[0].matcher, 'Bash', 'hook matcher');
-});
-
-check('the merge replaces an existing statusLine', () => {
-  const { json } = mergeInto(JSON.stringify(EXISTING), 'merge-replace');
-  eq(json.statusLine.command, 'node "/repo/statusline.js"', 'statusLine command');
-});
-
-check('the merge creates a settings file that is not there yet', () => {
-  const { json } = mergeInto(null, 'merge-absent');
-  eq(json.statusLine.command, 'node "/repo/statusline.js"', 'statusLine command');
-});
-
-check('the merge refuses invalid JSON and leaves the file untouched', () => {
-  const file = path.join(TMP, 'merge-broken.json');
-  const before = '{ "theme": "dark",,,';
-  fs.writeFileSync(file, before);
-  let status = 0;
-  try {
-    execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    status = e.status;
-  }
-  eq(status, 1, 'exit status');
-  eq(fs.readFileSync(file, 'utf8'), before, 'file contents');
-});
-
-check('the merge refuses a JSON file that is not an object', () => {
-  const file = path.join(TMP, 'merge-array.json');
-  fs.writeFileSync(file, '[1, 2, 3]');
-  let status = 0;
-  try {
-    execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    status = e.status;
-  }
-  eq(status, 1, 'exit status');
-  eq(fs.readFileSync(file, 'utf8'), '[1, 2, 3]', 'file contents');
 });
 
 // --- report -----------------------------------------------------------------

@@ -10,6 +10,7 @@
 'use strict';
 
 const { execFileSync } = require('child_process');
+const path = require('path');
 const os = require('os');
 
 const env = process.env;
@@ -81,26 +82,12 @@ function untilReset(resetsAt) {
 const truncate = (s, n) =>
   s.length > n ? s.slice(0, Math.max(1, n - GLYPH.ellipsis.length)) + GLYPH.ellipsis : s;
 
-// Slashes one way, no trailing separator. Both sides of the home comparison go
-// through this so the test and the slice below agree on where home ends.
-const normalize = (s) => s.replace(/\\/g, '/').replace(/\/+$/, '');
-
 function shortenPath(cwd) {
   const home = os.homedir();
-  let p = normalize(cwd);
-
-  if (home) {
-    const h = normalize(home);
-    // The separator check is the point: a bare startsWith() also matches a
-    // sibling that merely begins with the home path — /home/ya against
-    // /home/yawning, C:\Users\me against C:\Users\me-other — and renders it as
-    // "~wning" / "~-other".
-    const atBoundary = p.length === h.length || p[h.length] === '/';
-    if (atBoundary && p.slice(0, h.length).toLowerCase() === h.toLowerCase()) {
-      p = '~' + p.slice(h.length);
-    }
+  let p = cwd.replace(/\\/g, '/');
+  if (home && path.resolve(cwd).toLowerCase().startsWith(home.toLowerCase())) {
+    p = '~' + cwd.slice(home.length).replace(/\\/g, '/');
   }
-
   const segs = p.split('/').filter(Boolean);
   // keep the root marker plus the last two
   if (segs.length > 4) {
@@ -139,10 +126,7 @@ function parseBranchHeader(info) {
 function gitSegment(cwd) {
   let out;
   try {
-    // --no-optional-locks (git 2.15+): a plain `git status` refreshes the index
-    // and writes it back, taking .git/index.lock to do it. This runs on every
-    // render, so without the flag it races the user's own git commands.
-    out = execFileSync('git', ['--no-optional-locks', 'status', '--porcelain', '--branch'], {
+    out = execFileSync('git', ['status', '--porcelain', '--branch'], {
       cwd,
       timeout: 1000,
       maxBuffer: 4 * 1024 * 1024,
