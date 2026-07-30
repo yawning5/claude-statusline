@@ -68,39 +68,53 @@ Glyphs default to Unicode when the locale reports UTF-8, or when `TERM_PROGRAM` 
 `WT_SESSION` is present — those terminals handle UTF-8 but frequently leave the locale
 unset. `CLAUDE_STATUSLINE_STYLE` overrides the detection in either direction.
 
-## Git segment
+## Branch segment
 
-One `git status --porcelain --branch` call supplies branch, upstream divergence and
-dirtiness together. The status line re-renders constantly, so a second git process per
-render was worth removing.
+**The status line spawns no processes.** The branch name is read from `.git/HEAD`.
 
-The parser handles four header shapes, all confirmed against real repositories:
+It did not start that way. The first version ran `git status --porcelain --branch`, which
+hands back branch, upstream divergence and dirtiness in one call — `main↑1↓2*`. The problem
+is what `git status` does on the way: it refreshes the index and writes it back, taking
+`.git/index.lock` to do so. Once, that is free. On every render of a status line, in a
+repository where somebody is working, it races their own `git add` and `git commit` and
+they get `Unable to create '.git/index.lock': File exists` from a command they typed.
 
-| Header | Rendered |
+`--no-optional-locks` (git 2.15+) fixes the lock specifically — it tells git to skip the
+index write — and was the state of the code for a while. It still forks git on every
+render, which is the part that was ultimately rejected: a status line should be free.
+
+What that costs is real and worth stating plainly. **Dirtiness and ahead/behind are gone.**
+Neither can be computed from files alone at any sensible cost — dirtiness needs a
+working-tree-against-index diff, and the counts need a commit-graph walk that would mean
+decompressing loose objects and parsing packfiles. Both were implemented, tested, and
+removed on purpose. `test/run.js` asserts the states that used to decorate the branch name
+now leave it bare, so nobody restores a marker the script can no longer honestly compute.
+
+### Finding HEAD
+
+`findGitDir()` walks up from the working directory looking for `.git`, and handles the case
+where it is a **file** rather than a directory. Worktrees and submodules leave a pointer
+there:
+
+```
+gitdir: /home/you/project/.git/worktrees/side
+```
+
+The path may be relative, and it is relative to the directory holding the file, not to the
+process's working directory — resolving it the other way is a real bug, and there is a test
+for it.
+
+### Reading HEAD
+
+| `.git/HEAD` contains | Rendered |
 |---|---|
-| `## main...origin/main` | `main` |
-| `## main...origin/main [ahead 1, behind 2]` | `main↑1↓2` |
-| `## feature` (no upstream) | `feature` |
-| `## No commits yet on master` | `master` |
-| `## HEAD (no branch)` | `HEAD` |
+| `ref: refs/heads/main` | `main` |
+| `ref: refs/heads/feature/x` | `feature/x` |
+| `e0d0594…` (detached) | `e0d0594` |
+| anything else | segment dropped |
 
-Any line after the header means uncommitted work, which appends `*`.
-
-`ahead`/`behind` are measured against the branch's **upstream**, not a parent branch. Git
-does not record which branch something was forked from, so a parent-relative count would
-mean guessing `main`/`master` and paying an extra git call on every render. Rejected on
-those grounds.
-
-Branch names cannot contain `..`, so splitting the header on `...` to strip the upstream is
-safe.
-
-`execFileSync` carries a 1s timeout. A repository large enough to exceed it drops the git
-segment rather than stalling the status line.
-
-The call runs with `--no-optional-locks` (git 2.15+). A plain `git status` refreshes the
-index and writes it back, taking `.git/index.lock` while it does. That is harmless once;
-the status line does it on every render, where it races whatever git command the user is
-running in the same repository. The flag tells git to skip the write.
+A branch with no commits yet still has the `ref:` line, which is why a freshly initialised
+repository shows its branch name.
 
 ## Home paths
 
@@ -138,8 +152,15 @@ written, which is exactly the sort of thing that wastes an afternoon.
 
 ## Rejected
 
+- **Running git at all** — every render forked a process against a repository someone else
+  is using. Dirtiness and ahead/behind went with it; see above.
 - **Parent-branch commit counts** — extra git calls per render, and the parent has to be
   guessed.
+- **Git state from the session payload** — checked, not there. Claude Code sends
+  `session_id`, `cwd`, `model`, `workspace`, `version`, `output_style`, `cost`,
+  `context_window`, `exceeds_200k_tokens`, `fast_mode`, `thinking`, `effort` and
+  `rate_limits`. Nothing about the repository, so there is no free branch, dirty flag or
+  divergence count to pick up.
 - **`process.stdout.isTTY` colour detection** — always false here; see above.
 - **256-colour / truecolor** — breaks theme inheritance and older terminals.
 - **Displaying cost** — not the binding constraint on a subscription.

@@ -5,7 +5,7 @@
 A single-line status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
 
 ```
-▌ ~/dir │ main↑1↓2* │ Opus 5 (1M context) │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
+▌ ~/dir │ main │ Opus 5 (1M context) │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
 ```
 
 On a subscription the API-equivalent cost is not what constrains you, so this shows the
@@ -87,20 +87,20 @@ not on your `PATH` where Claude Code can see it.
 | Segment | Meaning |
 |---|---|
 | `~/dir` | Working directory. Deep paths collapse to `root/…/parent/dir`. |
-| `main` | Git branch. Omitted outside a repo. |
-| `↑2` | 2 commits on your branch that the upstream does not have — **unpushed**, run `git push`. |
-| `↓3` | 3 commits on the upstream you do not have — **unpulled**, run `git pull`. |
-| `↑1↓2` | Diverged. Pull or rebase before you can push. |
-| `*` | Uncommitted changes, tracked or untracked. |
+| `main` | Git branch, read from `.git/HEAD`. Omitted outside a repo. Detached HEAD shows the short commit id. |
 | `Opus 5` | Active model. |
 | `ctx 5%` | Context window used. |
 | `5h 29%` | 5-hour rate limit window used. |
 | `(2h13m)` | Time until that window resets. `6d3h`, `2h13m`, `47m`, `<1m`. Omitted if Claude Code does not report a reset time. |
 | `7d 1%` | 7-day rate limit window used. |
 
-Counts come from the branch's configured upstream. A branch with no upstream
-(`git checkout -b feature` and nothing else) shows no counts — there is nothing to compare
-against. They are **not** relative to a parent branch; git does not record one.
+**The status line never runs git.** The branch name is read out of `.git/HEAD` — no
+subprocess, on any render. That is a deliberate trade: a dirty-tree marker and
+ahead/behind counts both need `git status` or a commit-graph walk, and `git status`
+refreshes the index under `.git/index.lock`. The status line re-renders constantly, so
+that lock loses races against the git commands you type yourself, and an
+`Unable to create '.git/index.lock': File exists` on your own `git add` is a worse outcome
+than a missing asterisk. Branch name only, for free.
 
 Percentages turn green under 50%, yellow under 80%, red at or above. Values between 0 and
 1% render as `<1%` rather than rounding down to a misleading `0%`.
@@ -123,8 +123,8 @@ Glyphs default to Unicode when the locale (`LC_ALL`/`LC_CTYPE`/`LANG`) says UTF-
 locale unset. Otherwise everything degrades to ASCII:
 
 ```
-▌ ~/dir │ main↑1↓2* │ Opus 5 │ ctx 5% │ 5h 29% (2h13m)      unicode
-| ~/dir | main^1v2* | Opus 5 | ctx 5% | 5h 29% (2h13m)      ascii
+▌ ~/dir │ main │ Opus 5 │ ctx 5% │ 5h 29% (2h13m)      unicode
+| ~/dir | main | Opus 5 | ctx 5% | 5h 29% (2h13m)      ascii
 ```
 
 Only the 16 basic ANSI colours are used, so it renders the same everywhere and inherits
@@ -145,10 +145,11 @@ terminal. `test/run.js` has a regression test for exactly this.
 node test/run.js
 ```
 
-52 checks covering percentage rounding, the reset countdown, path shortening, malformed
+55 checks covering percentage rounding, the reset countdown, path shortening, malformed
 input, every colour and glyph switch, and the git segment against real temporary
-repositories — ahead, behind, diverged, dirty, detached HEAD, no upstream, and a repo with
-no commits yet, plus the settings merge both installers share.
+repositories — nested subdirectories, worktrees where `.git` is a file, detached HEAD, a
+repo with no commits yet, and a render with git nowhere on `PATH`, plus the settings merge
+both installers share.
 
 Fixtures carry no absolute timestamps. Countdown cases build `resets_at` relative to the
 current time so they do not rot.
@@ -170,4 +171,5 @@ handler, look at the file, then take it back out.
 
 ## Design notes
 
-`docs/design.md` records the decisions and the git output shapes the parser handles.
+`docs/design.md` records the decisions, including why the git subprocess was removed and
+what that cost.

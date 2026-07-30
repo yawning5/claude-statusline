@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Claude Code status line.
 // Reads the session JSON on stdin, prints one line:
-//   ▌ ~/dir │ main↑1↓2* │ Opus 5 │ ctx 5% │ 5h 29% │ 7d 1%
+//   ▌ ~/dir │ main │ Opus 5 │ ctx 5% │ 5h 29% │ 7d 1%
+//
+// Spawns nothing. The branch name is read straight out of .git/HEAD, so a
+// render can never contend with the git commands you are typing yourself.
 //
 // Terminal behaviour is tuned by the environment:
 //   NO_COLOR / FORCE_COLOR=0 / TERM=dumb   drop colour
@@ -9,7 +12,8 @@
 //   CLAUDE_STATUSLINE_STYLE=ascii|unicode  force the glyph set
 'use strict';
 
-const { execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const os = require('os');
 
 const env = process.env;
@@ -36,8 +40,8 @@ function unicodeEnabled() {
 const COLOR = colorEnabled();
 
 const GLYPH = unicodeEnabled()
-  ? { lead: '▌', sep: ' │ ', ellipsis: '…', ahead: '↑', behind: '↓' }
-  : { lead: '|', sep: ' | ', ellipsis: '...', ahead: '^', behind: 'v' };
+  ? { lead: '▌', sep: ' │ ', ellipsis: '…' }
+  : { lead: '|', sep: ' | ', ellipsis: '...' };
 
 // 16-colour ANSI only — the one palette every terminal agrees on.
 const sgr = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -112,63 +116,69 @@ function shortenPath(cwd) {
 
 const MAX_BRANCH = 24;
 
-// Parse the `## ` header of `git status --porcelain --branch`. Four shapes:
-//   "main...origin/main [ahead 1, behind 2]"   tracking an upstream
-//   "feature"                                  no upstream configured
-//   "No commits yet on master"                 fresh repo
-//   "HEAD (no branch)"                         detached
-function parseBranchHeader(info) {
-  const fresh = /^No commits yet on (.+)$/.exec(info);
-  if (fresh) return { branch: fresh[1], ahead: 0, behind: 0 };
-  if (info.startsWith('HEAD (no branch)')) return { branch: 'HEAD', ahead: 0, behind: 0 };
-
-  const track = /\s\[(.+)\]$/.exec(info);
-  const ahead = track && /ahead (\d+)/.exec(track[1]);
-  const behind = track && /behind (\d+)/.exec(track[1]);
-  return {
-    // branch names cannot contain "..", so splitting on the upstream separator is safe
-    branch: info.replace(/\s\[.+\]$/, '').split('...')[0],
-    ahead: ahead ? Number(ahead[1]) : 0,
-    behind: behind ? Number(behind[1]) : 0,
-  };
-}
-
-// One `git status --porcelain --branch` yields branch, upstream divergence and
-// dirtiness together. The status line re-renders constantly, so a second git
-// process per render is worth avoiding.
-function gitSegment(cwd) {
-  let out;
+// Walk up from cwd looking for .git. Returns the git directory itself, which is
+// not always the `.git` entry we found: worktrees and submodules leave a file
+// there reading `gitdir: <path>` and keep HEAD at that path instead.
+function findGitDir(start) {
+  let dir;
   try {
-    // --no-optional-locks (git 2.15+): a plain `git status` refreshes the index
-    // and writes it back, taking .git/index.lock to do it. This runs on every
-    // render, so without the flag it races the user's own git commands.
-    out = execFileSync('git', ['--no-optional-locks', 'status', '--porcelain', '--branch'], {
-      cwd,
-      timeout: 1000,
-      maxBuffer: 4 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      encoding: 'utf8',
-      windowsHide: true,
-    });
+    dir = path.resolve(start);
   } catch {
-    // not a repo, git missing, or a repo big enough to blow the timeout
     return null;
   }
 
-  const lines = out.split('\n');
-  if (!lines[0] || !lines[0].startsWith('## ')) return null;
+  for (;;) {
+    const candidate = path.join(dir, '.git');
+    let st = null;
+    try { st = fs.statSync(candidate); } catch {}
 
-  const { branch, ahead, behind } = parseBranchHeader(lines[0].slice(3).trim());
-  if (!branch) return null;
+    if (st) {
+      if (st.isDirectory()) return candidate;
+      try {
+        const m = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(candidate, 'utf8'));
+        // the path may be relative, and it is relative to the file's directory
+        if (m) return path.resolve(dir, m[1].trim());
+      } catch {}
+      return null;
+    }
 
-  const dirty = lines.slice(1).some((l) => l.trim() !== '');
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // hit the filesystem root
+    dir = parent;
+  }
+}
 
-  let label = truncate(branch, MAX_BRANCH);
-  if (ahead) label += GLYPH.ahead + ahead;
-  if (behind) label += GLYPH.behind + behind;
-  if (dirty) label += '*';
+// Branch name only, read off the filesystem. Nothing here spawns a process.
+//
+// The obvious implementation shells out to `git status`, which also yields
+// dirtiness and upstream divergence. It was rejected: `git status` refreshes the
+// index and writes it back under .git/index.lock, and the status line re-renders
+// constantly, so it loses races against the git commands the user is typing.
+// `--no-optional-locks` avoids the lock but still forks git on every render.
+// Dirtiness and ahead/behind cannot be had without one — dirtiness needs a
+// working-tree diff, and the counts need a commit-graph walk through packfiles —
+// so they are simply not shown.
+function branchSegment(cwd) {
+  const gitDir = findGitDir(cwd);
+  if (!gitDir) return null;
 
-  return dirty ? C.yellow(label) : C.green(label);
+  let head;
+  try {
+    head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+  } catch {
+    return null;
+  }
+
+  // "ref: refs/heads/main" on a branch, a bare 40-char sha when detached.
+  // A branch with no commits yet still has the ref line, which is why a fresh
+  // repository shows its branch name here.
+  const ref = /^ref:\s*(.+)$/.exec(head);
+  const name = ref
+    ? ref[1].replace(/^refs\/heads\//, '')
+    : /^[0-9a-f]{7,40}$/i.test(head) ? head.slice(0, 7) : null;
+  if (!name) return null;
+
+  return C.green(truncate(name, MAX_BRANCH));
 }
 
 let raw = '';
@@ -181,8 +191,8 @@ process.stdin.on('end', () => {
   const cwd = (d.workspace && d.workspace.current_dir) || d.cwd || process.cwd();
   const parts = [C.dir(shortenPath(cwd))];
 
-  const git = gitSegment(cwd);
-  if (git) parts.push(git);
+  const branch = branchSegment(cwd);
+  if (branch) parts.push(branch);
 
   if (d.model && d.model.display_name) parts.push(C.magenta(d.model.display_name));
 

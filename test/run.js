@@ -365,21 +365,33 @@ check('a clean repo shows a bare branch name', () => {
   eq(branchOf(dir), 'main', 'branch segment');
 });
 
-check('modified files add an asterisk', () => {
+check('a subdirectory finds the branch of the repo above it', () => {
+  const dir = newRepo('nested', 'main');
+  commit(dir, 'a.txt', 'A');
+  const deep = path.join(dir, 'src', 'inner');
+  fs.mkdirSync(deep, { recursive: true });
+  eq(branchOf(deep), 'main', 'branch segment');
+});
+
+// Dirtiness and upstream divergence were dropped along with the git subprocess.
+// These pin that down: the states that used to decorate the branch name must now
+// leave it bare, so nobody "restores" a marker the script can no longer compute.
+
+check('a modified working tree still renders a bare branch name', () => {
   const dir = newRepo('dirty', 'main');
   commit(dir, 'a.txt', 'A');
   fs.writeFileSync(path.join(dir, 'a.txt'), 'changed');
-  eq(branchOf(dir), 'main*', 'branch segment');
+  eq(branchOf(dir), 'main', 'branch segment');
 });
 
-check('untracked files add an asterisk', () => {
+check('untracked files still render a bare branch name', () => {
   const dir = newRepo('untracked', 'main');
   commit(dir, 'a.txt', 'A');
   fs.writeFileSync(path.join(dir, 'new.txt'), 'x');
-  eq(branchOf(dir), 'main*', 'branch segment');
+  eq(branchOf(dir), 'main', 'branch segment');
 });
 
-check('a branch with no upstream shows no counts', () => {
+check('a branch with no upstream renders its own name', () => {
   const dir = newRepo('noupstream', 'main');
   commit(dir, 'a.txt', 'A');
   git(dir, 'checkout', '-q', '-b', 'feature');
@@ -387,55 +399,76 @@ check('a branch with no upstream shows no counts', () => {
   eq(branchOf(dir), 'feature', 'branch segment');
 });
 
-check('unpushed commits show as ahead', () => {
+check('unpushed commits add no counts', () => {
   const { dir } = repoWithRemote('ahead');
   commit(dir, 'b.txt', 'B');
   commit(dir, 'c.txt', 'C');
-  eq(branchOf(dir), 'main↑2', 'branch segment');
+  eq(branchOf(dir), 'main', 'branch segment');
 });
 
-check('unpulled commits show as behind', () => {
-  const { dir, bare } = repoWithRemote('behind');
-  const other = path.join(TMP, 'behind-other');
-  git(TMP, 'clone', '-q', bare, other);
-  commit(other, 'b.txt', 'B');
-  commit(other, 'c.txt', 'C');
-  git(other, 'push', '-q');
-  git(dir, 'fetch', '-q');
-  eq(branchOf(dir), 'main↓2', 'branch segment');
-});
-
-check('a diverged branch shows both counts', () => {
+check('a diverged branch adds no counts', () => {
   const { dir, bare } = repoWithRemote('diverged');
   const other = path.join(TMP, 'diverged-other');
   git(TMP, 'clone', '-q', bare, other);
   commit(other, 'b.txt', 'B');
-  commit(other, 'c.txt', 'C');
   git(other, 'push', '-q');
   git(dir, 'fetch', '-q');
   commit(dir, 'mine.txt', 'M');
-  eq(branchOf(dir), 'main↑1↓2', 'branch segment');
+  eq(branchOf(dir), 'main', 'branch segment');
 });
 
-check('counts and the dirty marker combine', () => {
-  const { dir } = repoWithRemote('combo');
-  commit(dir, 'b.txt', 'B');
-  fs.writeFileSync(path.join(dir, 'scratch.txt'), 'x');
-  eq(branchOf(dir), 'main↑1*', 'branch segment');
-});
-
-check('ascii style swaps the arrows', () => {
-  const { dir } = repoWithRemote('ascii-arrows');
-  commit(dir, 'b.txt', 'B');
-  const out = render({ workspace: { current_dir: dir } }, { CLAUDE_STATUSLINE_STYLE: 'ascii' });
-  eq(segments(out)[1], 'main^1', 'branch segment');
-});
-
-check('detached HEAD is labelled', () => {
+check('detached HEAD shows the short commit id', () => {
   const dir = newRepo('detached', 'main');
   commit(dir, 'a.txt', 'A');
   git(dir, 'checkout', '-q', '--detach', 'HEAD');
-  eq(branchOf(dir), 'HEAD', 'branch segment');
+  const branch = branchOf(dir);
+  if (!/^[0-9a-f]{7}$/.test(branch)) {
+    throw new Error(`expected a 7-character sha, got ${JSON.stringify(branch)}`);
+  }
+});
+
+// --- .git that is a file rather than a directory ----------------------------
+
+check('a worktree, where .git is a file, resolves to its own branch', () => {
+  const dir = newRepo('wt-main', 'main');
+  commit(dir, 'a.txt', 'A');
+  const wt = path.join(TMP, 'wt-linked');
+  git(dir, 'worktree', 'add', '-q', '-b', 'side', wt);
+  if (!fs.statSync(path.join(wt, '.git')).isFile()) throw new Error('expected .git to be a file');
+  eq(branchOf(wt), 'side', 'branch segment');
+});
+
+check('a relative gitdir is resolved against the file that holds it', () => {
+  const dir = path.join(TMP, 'relgit');
+  fs.mkdirSync(path.join(dir, 'elsewhere'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git'), 'gitdir: ./elsewhere\n');
+  fs.writeFileSync(path.join(dir, 'elsewhere', 'HEAD'), 'ref: refs/heads/relative\n');
+  eq(branchOf(dir), 'relative', 'branch segment');
+});
+
+check('a .git file that is not a gitdir pointer has no branch segment', () => {
+  const dir = path.join(TMP, 'junkgit');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git'), 'not a pointer\n');
+  eq(segments(render({ workspace: { current_dir: dir } })).length, 1, 'segment count');
+});
+
+check('an unparseable HEAD has no branch segment', () => {
+  const dir = path.join(TMP, 'junkhead');
+  fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'neither a ref nor a sha\n');
+  eq(segments(render({ workspace: { current_dir: dir } })).length, 1, 'segment count');
+});
+
+// --- the no-subprocess guarantee --------------------------------------------
+
+check('the branch renders with git nowhere on PATH', () => {
+  const dir = newRepo('nogit', 'main');
+  commit(dir, 'a.txt', 'A');
+  // render() spawns node by absolute path, so emptying PATH only hides git.
+  // Any implementation that shells out fails here; reading .git/HEAD does not.
+  const out = render({ workspace: { current_dir: dir } }, { PATH: '', PATHEXT: undefined });
+  eq(segments(out)[1], 'main', 'branch segment');
 });
 
 check('long branch names are truncated', () => {
