@@ -97,6 +97,45 @@ safe.
 `execFileSync` carries a 1s timeout. A repository large enough to exceed it drops the git
 segment rather than stalling the status line.
 
+The call runs with `--no-optional-locks` (git 2.15+). A plain `git status` refreshes the
+index and writes it back, taking `.git/index.lock` while it does. That is harmless once;
+the status line does it on every render, where it races whatever git command the user is
+running in the same repository. The flag tells git to skip the write.
+
+## Home paths
+
+`shortenPath()` collapses the home directory to `~` only when the next character is a
+separator or the path ends there. A bare `startsWith()` also matches a sibling that merely
+begins with the home path — `/home/ya` against `/home/yawning`, `C:\Users\me` against
+`C:\Users\me-other` — and renders it as `~wning` / `~-other`.
+
+Both sides are normalised (slashes one way, trailing separator dropped) before comparing,
+so the test and the slice that follows agree on where home ends. The earlier version
+compared `path.resolve(cwd)` but sliced the raw `cwd`, so a trailing separator on `$HOME`
+also cost the first character of the remainder.
+
+Tests for this build native-shaped paths (`C:\home\me` on Windows, `/home/me` elsewhere).
+A POSIX-looking literal is not enough: `path.resolve()` rewrites it to `C:\…` on Windows,
+which made an earlier draft of these cases pass there without exercising anything.
+
+## Installers
+
+There are two — `install.sh` and `install.ps1` — but one merge. Both call
+`merge-settings.js`, which reads the existing `settings.json`, sets the `statusLine` key and
+writes the rest back untouched.
+
+Reimplementing the merge in PowerShell was rejected. `ConvertTo-Json` defaults to a depth of
+2 and silently flattens everything below it, so a settings file with a `hooks` block comes
+back out as `"@{hooks=System.Object[]}"`. `-Depth` fixes that, but the failure is quiet, the
+blast radius is somebody's entire configuration, and Node is already a hard requirement for
+the status line itself.
+
+`install.sh` converts the repo path with `cygpath -m` when it is available. Under Git Bash
+the path is `/c/...`, which is meaningless to the `cmd.exe` that may end up running the
+command. MSYS does convert arguments on their way to a native program, so the written path
+was already correct by accident — but the path *printed* by the installer was not the one
+written, which is exactly the sort of thing that wastes an afternoon.
+
 ## Rejected
 
 - **Parent-branch commit counts** — extra git calls per render, and the parent has to be

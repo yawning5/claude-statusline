@@ -1,5 +1,7 @@
 # claude-statusline
 
+[![test](https://github.com/yawning5/claude-statusline/actions/workflows/test.yml/badge.svg)](https://github.com/yawning5/claude-statusline/actions/workflows/test.yml)
+
 A single-line status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
 
 ```
@@ -30,6 +32,27 @@ have it back:
 ```sh
 chmod +x ~/claude-statusline/install.sh ~/claude-statusline/statusline.js
 ```
+
+### Windows
+
+`install.ps1` does the same thing without Git Bash, in either Windows PowerShell 5.1 or
+PowerShell 7:
+
+```powershell
+git clone https://github.com/yawning5/claude-statusline.git $HOME\claude-statusline
+& $HOME\claude-statusline\install.ps1
+```
+
+If PowerShell refuses to run it, the execution policy is blocking local scripts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File $HOME\claude-statusline\install.ps1
+```
+
+Both installers hand the JSON merge to `merge-settings.js`, so they cannot drift apart —
+and the merge stays in Node deliberately. PowerShell's `ConvertTo-Json` flattens anything
+past its default depth of 2, which would turn a real settings file's nested `hooks` block
+into the string `"@{hooks=System.Object[]}"`.
 
 ### By hand
 
@@ -122,13 +145,19 @@ terminal. `test/run.js` has a regression test for exactly this.
 node test/run.js
 ```
 
-43 checks covering percentage rounding, the reset countdown, path shortening, malformed
+52 checks covering percentage rounding, the reset countdown, path shortening, malformed
 input, every colour and glyph switch, and the git segment against real temporary
 repositories — ahead, behind, diverged, dirty, detached HEAD, no upstream, and a repo with
-no commits yet.
+no commits yet, plus the settings merge both installers share.
 
 Fixtures carry no absolute timestamps. Countdown cases build `resets_at` relative to the
 current time so they do not rot.
+
+CI runs the same command on Linux, macOS and Windows across Node 18, 22 and 24, and runs
+both installers against a throwaway `CLAUDE_CONFIG_DIR` — `install.ps1` under both
+PowerShell 7 and Windows PowerShell 5.1. The suite drives real git and real path
+separators, so a platform-specific break is a realistic failure mode rather than a
+theoretical one; `fail-fast` is off so one platform going red does not hide the rest.
 
 `statusline.js` reads Claude Code's session JSON on stdin. To see the real payload:
 
