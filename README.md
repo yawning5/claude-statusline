@@ -5,7 +5,7 @@
 A single-line status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
 
 ```
-▌ ~/dir │ main │ Opus 5 (1M context) │ ⚡H │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
+▌ ~/dir │ main │ Opus 5 (1M context) │ high │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
 ```
 
 On a subscription the API-equivalent cost is not what constrains you, so this shows the
@@ -89,7 +89,7 @@ not on your `PATH` where Claude Code can see it.
 | `~/dir` | Working directory. Deep paths collapse to `root/…/parent/dir`. |
 | `main` | Git branch, read from `.git/HEAD`. Omitted outside a repo. Detached HEAD shows the short commit id. |
 | `Opus 5` | Active model. |
-| `⚡H` | Reasoning effort, as set by `/effort`. Omitted if Claude Code does not report one. |
+| `high` | Reasoning effort, as set by `/effort`, in Claude Code's own colour for that level. |
 | `ctx 5%` | Context window used. |
 | `5h 29%` | 5-hour rate limit window used. |
 | `(2h13m)` | Time until that window resets. `6d3h`, `2h13m`, `47m`, `<1m`. Omitted if Claude Code does not report a reset time. |
@@ -106,22 +106,77 @@ than a missing asterisk. Branch name only, for free.
 Percentages turn green under 50%, yellow under 80%, red at or above. Values between 0 and
 1% render as `<1%` rather than rounding down to a misleading `0%`.
 
-The effort badge is a letter rather than the level name — the names are long enough to
-crowd the line, and this is a value you glance at to confirm, not read. Colour repeats the
-ordering, so it reads before the letter does:
+## The effort label
 
-| `/effort` | Badge | Colour |
-|---|---|---|
-| `low` | `⚡L` | dim |
-| `medium` | `⚡M` | green |
-| `high` | `⚡H` | green |
-| `xhigh` | `⚡X` | yellow |
-| `max` | `⚡MAX` | red |
-| `ultracode` | `⚡UC` | red |
-| anything else | first 5 characters, uppercased | magenta |
+The `/effort` level is printed by name, in **the colour Claude Code paints it in its own
+`/effort` menu**, so the two agree at a glance. The values are Claude Code's, read out of
+its binary rather than matched by eye:
 
-An unrecognised level still renders. Claude Code has added levels before, and a segment
-that silently vanished on the next one would look like a bug rather than a stale table.
+| `/effort` | Colour | 24-bit | 16-colour |
+|---|---|---|---|
+| `low` | warning | `rgb(255,193,7)` | yellow |
+| `medium` | success | `rgb(78,186,101)` | green |
+| `high` | permission | `rgb(87,105,247)` | blue |
+| `xhigh` | autoAccept | `rgb(208,180,255)` | magenta |
+| `max` | rainbow | spectrum across the label | ANSI rainbow across the label |
+| `ultracode` | violet-ripple | `rgb(62,22,118)` → `rgb(140,80,240)` across the label | magenta |
+| anything else | — | magenta | magenta |
+
+`ultracode` does not arrive in the payload at all — see [below](#where-ultracode-comes-from).
+
+`max` and `ultracode` are **animations** in Claude Code — a rolling rainbow and a violet
+ripple. A status line cannot animate: it prints one static string per render and has no say
+in when the next render happens. So each is rendered as the spatial version of itself, with
+the colour spread across the characters of the label instead of across time:
+
+```
+ultracode        rgb(62,22,118) ─────────────────► rgb(140,80,240)
+                 u  l  t  r  a  c  o  d  e
+```
+
+Standing still, but the same colours in the same order. In 16-colour terminals the rainbow
+survives, because its stops have ANSI equivalents; the gradient does not, and `ultracode`
+falls back to plain magenta rather than pretending.
+
+An unrecognised level still renders, in magenta. Claude Code has added levels before, and a
+segment that silently vanished on the next one would look like a bug rather than a stale
+table.
+
+### Where `ultracode` comes from
+
+`ultracode` is not an effort level. It is a separate session-scoped flag that pins effort to
+`xhigh` and switches on standing workflow orchestration, and **Claude Code does not put it
+in the status line payload** — `effort.level` says `xhigh`, which is the truth about the
+effort being applied. It is also never written to your settings: the schema says outright
+that *"interactive toggles never persist it"*.
+
+It is still recoverable. Entering and leaving ultracode appends a record to the session
+transcript, and the payload already hands over `transcript_path`:
+
+```jsonc
+{"attachment":{"type":"ultra_effort_enter","reminderType":"full"},"type":"attachment", …}
+{"attachment":{"type":"ultra_effort_exit"},"type":"attachment", …}
+```
+
+Newest wins. That is not a guess — it is the same backwards scan Claude Code itself uses to
+decide whether ultracode is on, so the two agree by construction.
+
+Four guards keep this from ever claiming something untrue:
+
+| Guard | Why |
+|---|---|
+| Only `xhigh` triggers a read | Ultracode pins effort to `xhigh`, so no other level can be hiding it — and no other level costs a file read. |
+| Capped tail read (256 KB) | Bounds the work. A marker past the cap under-claims rather than being hunted for. |
+| Structural parse, not substring | A transcript that merely *quotes* one of these records — a conversation about them — stores it escaped inside a message and cannot pass a real parse. `isSidechain` records are subagent traffic, not session state. |
+| Markers older than this run are ignored | A resumed session keeps its transcript but starts a new process, and ultracode does not survive a restart. The run's start time comes from Claude Code's own session registry. |
+
+**The honest caveat:** the marker is written on your next prompt, not the instant you
+toggle. So there is a one-prompt lag in both directions — measured at 10.4 s entering and
+6.0 s leaving. Entering, that under-claims (you see `xhigh` briefly). Leaving, it
+over-claims (you see `ultracode` briefly) until the next prompt corrects it.
+
+If the record format ever changes, the scan finds nothing and the label falls back to
+`xhigh`. That degradation is silent by design — under-claiming beats inventing.
 
 ## Terminal compatibility
 
@@ -135,18 +190,24 @@ Colour and glyphs adapt automatically, and can be forced:
 | `TERM=dumb` | Drop colour. |
 | `CLAUDE_STATUSLINE_STYLE=ascii` | Force the ASCII glyph set. |
 | `CLAUDE_STATUSLINE_STYLE=unicode` | Force the Unicode glyph set. |
+| `CLAUDE_STATUSLINE_TRUECOLOR=0` | Force 24-bit colour off, so the effort label stays 16-colour. |
+| `CLAUDE_STATUSLINE_TRUECOLOR=1` | Force 24-bit colour on. |
 
 Glyphs default to Unicode when the locale (`LC_ALL`/`LC_CTYPE`/`LANG`) says UTF-8, or when
 `TERM_PROGRAM`/`WT_SESSION` is set — terminals that render UTF-8 fine but often leave the
 locale unset. Otherwise everything degrades to ASCII:
 
 ```
-▌ ~/dir │ main │ Opus 5 │ ⚡H │ ctx 5% │ 5h 29% (2h13m)      unicode
-| ~/dir | main | Opus 5 | *H | ctx 5% | 5h 29% (2h13m)      ascii
+▌ ~/dir │ main │ Opus 5 │ high │ ctx 5% │ 5h 29% (2h13m)      unicode
+| ~/dir | main | Opus 5 | high | ctx 5% | 5h 29% (2h13m)      ascii
 ```
 
-Only the 16 basic ANSI colours are used, so it renders the same everywhere and inherits
-your terminal theme. No 256-colour or truecolor escapes.
+Every segment but one uses only the 16 basic ANSI colours, so it renders the same
+everywhere and inherits your terminal theme. **The effort label is the exception**:
+matching Claude Code's own palette needs 24-bit colour, so it emits `38;2;r;g;b` when the
+terminal advertises support — `COLORTERM=truecolor`/`24bit`, `WT_SESSION`, or any
+`TERM_PROGRAM` other than `Apple_Terminal`, which sets it but stops at 256 colours.
+Everywhere else it falls back to 16 colours. Nothing emits 256-colour escapes.
 
 Set these in your shell profile, not in the `statusLine` command — Claude Code runs the
 command through your shell, so the environment carries over.

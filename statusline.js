@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Claude Code status line.
 // Reads the session JSON on stdin, prints one line:
-//   ▌ ~/dir │ main │ Opus 5 │ ⚡H │ ctx 5% │ 5h 29% │ 7d 1%
+//   ▌ ~/dir │ main │ Opus 5 │ high │ ctx 5% │ 5h 29% │ 7d 1%
 //
 // Spawns nothing. The branch name is read straight out of .git/HEAD, so a
 // render can never contend with the git commands you are typing yourself.
@@ -10,6 +10,7 @@
 //   NO_COLOR / FORCE_COLOR=0 / TERM=dumb   drop colour
 //   FORCE_COLOR=1|2|3                      keep colour regardless
 //   CLAUDE_STATUSLINE_STYLE=ascii|unicode  force the glyph set
+//   CLAUDE_STATUSLINE_TRUECOLOR=0|1        force 24-bit colour off or on
 'use strict';
 
 const fs = require('fs');
@@ -28,6 +29,21 @@ function colorEnabled() {
   return true;
 }
 
+// 24-bit colour, needed only by the effort labels — everything else is 16-colour
+// and stays that way. COLORTERM is the standard signal but is frequently unset,
+// so the known-good terminals are accepted directly, the same way glyphs are
+// decided below. Apple_Terminal is the exception that has to be named: it sets
+// TERM_PROGRAM and tops out at 256 colours.
+function truecolorEnabled() {
+  const forced = env.CLAUDE_STATUSLINE_TRUECOLOR;
+  if (forced) return forced !== '0';
+  if (/^(truecolor|24bit)$/i.test(env.COLORTERM || '')) return true;
+  if (env.WT_SESSION) return true;
+
+  const prog = env.TERM_PROGRAM || '';
+  return Boolean(prog) && prog !== 'Apple_Terminal';
+}
+
 function unicodeEnabled() {
   const forced = (env.CLAUDE_STATUSLINE_STYLE || '').toLowerCase();
   if (forced === 'ascii') return false;
@@ -38,13 +54,11 @@ function unicodeEnabled() {
 }
 
 const COLOR = colorEnabled();
+const TRUECOLOR = COLOR && truecolorEnabled();
 
-// bolt: U+26A1 is emoji-presentation in most terminals, so it occupies two
-// columns. That is fine here — nothing in this line is column-aligned — but it
-// is exactly the kind of glyph the ascii fallback exists for.
 const GLYPH = unicodeEnabled()
-  ? { lead: '▌', sep: ' │ ', ellipsis: '…', bolt: '⚡' }
-  : { lead: '|', sep: ' | ', ellipsis: '...', bolt: '*' };
+  ? { lead: '▌', sep: ' │ ', ellipsis: '…' }
+  : { lead: '|', sep: ' | ', ellipsis: '...' };
 
 // 16-colour ANSI only — the one palette every terminal agrees on.
 const sgr = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -186,40 +200,181 @@ function branchSegment(cwd) {
 
 // Reasoning effort, as set by /effort. Payload shape: {"effort":{"level":"high"}}.
 //
-// Rendered as a one-or-two-character badge rather than the level name. The
-// names are long ("ultracode" alone is as wide as the whole rate-limit
-// segment) and this is a value you glance at to confirm, not read. Colour
-// carries the same ordering the tag does, so the badge is legible at a glance
-// even before the letter registers: quiet for low, green through the ordinary
-// range, then yellow and red as the setting gets expensive.
+// The level name is printed in the colour Claude Code paints it in its own
+// /effort menu, so the status line and the menu agree at a glance. Those colours
+// were read out of the Claude Code binary rather than eyeballed — the menu
+// defines low→warning, medium→success, high→permission, xhigh→autoAccept,
+// max→rainbow-animated, ultracode→violet-ripple, and each of those tokens
+// resolves to the values below.
+//
+// The last two are animations, and a status line cannot animate: it prints one
+// static string per render and has no say in when the next render happens. So
+// each is rendered as the spatial version of itself — the colour is spread
+// across the characters of the label instead of across time. The ripple becomes
+// a gradient, the rainbow becomes a spectrum. Standing still, but the same
+// colours in the same order.
 const EFFORT = {
-  low: { tag: 'L', paint: (s) => C.dim(s) },
-  medium: { tag: 'M', paint: (s) => C.green(s) },
-  high: { tag: 'H', paint: (s) => C.green(s) },
-  xhigh: { tag: 'X', paint: (s) => C.yellow(s) },
-  max: { tag: 'MAX', paint: (s) => C.red(s) },
-  // ultracode is xhigh plus dynamic workflow orchestration, session-scoped.
-  ultracode: { tag: 'UC', paint: (s) => C.red(s) },
+  low: { rgb: [255, 193, 7], ansi: 93 },     // warning
+  medium: { rgb: [78, 186, 101], ansi: 92 }, // success
+  high: { rgb: [87, 105, 247], ansi: 94 },   // permission
+  xhigh: { rgb: [208, 180, 255], ansi: 95 }, // autoAccept shimmer
 };
 
-const MAX_EFFORT_TAG = 5;
+// violet-ripple, interpolated over exactly the endpoints Claude Code uses.
+const RIPPLE = { from: [62, 22, 118], to: [140, 80, 240], ansi: 35 };
 
-function effortSegment(effort) {
-  const value = effort && effort.level;
+// rainbow-animated, in ROYGBIV order, each with Claude Code's own ANSI fallback.
+const RAINBOW = [
+  { rgb: [235, 95, 87], ansi: 31 },
+  { rgb: [245, 139, 87], ansi: 91 },
+  { rgb: [250, 195, 95], ansi: 33 },
+  { rgb: [145, 200, 130], ansi: 32 },
+  { rgb: [130, 170, 220], ansi: 36 },
+  { rgb: [155, 130, 200], ansi: 34 },
+  { rgb: [200, 130, 180], ansi: 35 },
+];
+
+const MAX_EFFORT_LABEL = 12;
+const MAX_TRANSCRIPT_TAIL = 256 * 1024;
+
+// Reads the last `bytes` of a file. Returns null rather than throwing, and does
+// not care that the first line is probably cut in half — the caller parses line
+// by line and a broken line simply fails to parse.
+function readTail(file, bytes) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.allocUnsafe(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    return buf.toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+}
+
+// When this session's process started, from Claude Code's own session registry.
+//
+// This exists for one case: a resumed session keeps its transcript file but runs
+// as a new process, and ultracode does not survive a restart. Without this the
+// markers left by the previous run would be read as current state.
+function sessionStartedAt(sessionId) {
+  const home = os.homedir();
+  if (!home || !sessionId) return null;
+
+  const dir = path.join(home, '.claude', 'sessions');
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return null; }
+
+  for (const name of names) {
+    try {
+      const s = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (s.sessionId === sessionId && typeof s.startedAt === 'number') return s.startedAt;
+    } catch {}
+  }
+  return null;
+}
+
+// Is ultracode on? Claude Code will not say so in the payload — effort.level
+// reports the xhigh it genuinely applies — so the answer comes from the session
+// transcript, whose path the payload does hand over.
+//
+// Entering ultracode appends a record shaped like:
+//   {"attachment":{"type":"ultra_effort_enter","reminderType":"full"},"type":"attachment",…}
+// and leaving appends an ultra_effort_exit. Claude Code decides the live state by
+// scanning its message list backwards for whichever of the two is newest. This
+// runs the same scan over the same records, so the two agree by construction
+// rather than by coincidence.
+//
+// Every failure here returns false, which means the label falls back to the
+// plain level — under-claiming rather than asserting something untrue.
+function ultracodeActive(d) {
+  if (typeof d.transcript_path !== 'string' || !d.transcript_path) return false;
+
+  const tail = readTail(d.transcript_path, MAX_TRANSCRIPT_TAIL);
+  if (tail === null) return false;
+
+  const startedAt = sessionStartedAt(d.session_id);
+  const lines = tail.split('\n');
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    // Cheap filter first; the parse below is what actually decides. A transcript
+    // that merely quotes one of these records — a conversation about them, say —
+    // stores it as an escaped string inside a message and cannot survive the
+    // structural checks underneath.
+    if (lines[i].indexOf('ultra_effort_') === -1) continue;
+
+    let rec;
+    try { rec = JSON.parse(lines[i]); } catch { continue; }
+    if (!rec || rec.type !== 'attachment' || !rec.attachment) continue;
+    // Subagent traffic is interleaved into this same file and is not session state.
+    if (rec.isSidechain) continue;
+
+    const kind = rec.attachment.type;
+    if (kind !== 'ultra_effort_enter' && kind !== 'ultra_effort_exit') continue;
+
+    // Older than this run means it belongs to a run whose flag died with it.
+    if (startedAt !== null) {
+      const at = Date.parse(rec.timestamp);
+      if (Number.isFinite(at) && at < startedAt) return false;
+    }
+
+    return kind === 'ultra_effort_enter';
+  }
+
+  return false;
+}
+
+const fg = (rgb) => `38;2;${rgb[0]};${rgb[1]};${rgb[2]}`;
+const lerp = (a, b, t) => Math.round(a + (b - a) * t);
+
+// Paints each character with the colour at its own position along 0..1. A
+// single-character label sits at 0 rather than dividing by zero.
+function spread(label, codeAt) {
+  const n = label.length;
+  return Array.from(label, (ch, i) => sgr(codeAt(n > 1 ? i / (n - 1) : 0))(ch)).join('');
+}
+
+const rippleAt = (t) => fg([
+  lerp(RIPPLE.from[0], RIPPLE.to[0], t),
+  lerp(RIPPLE.from[1], RIPPLE.to[1], t),
+  lerp(RIPPLE.from[2], RIPPLE.to[2], t),
+]);
+
+// Stops are spread across the whole spectrum rather than taken in sequence, so
+// a three-character "max" still reads as a rainbow instead of as three reds.
+const rainbowAt = (t) => {
+  const stop = RAINBOW[Math.round(t * (RAINBOW.length - 1))];
+  return TRUECOLOR ? fg(stop.rgb) : String(stop.ansi);
+};
+
+function effortSegment(d) {
+  const value = d.effort && d.effort.level;
   if (typeof value !== 'string' || !value.trim()) return null;
 
-  const level = value.trim().toLowerCase();
-  const known = EFFORT[level];
+  let level = value.trim().toLowerCase();
 
+  // Ultracode pins effort to xhigh, so xhigh is the only level that can be
+  // hiding it. Testing that first keeps every other level free of file reads.
+  if (level === 'xhigh' && ultracodeActive(d)) level = 'ultracode';
+
+  // Without 24-bit colour a gradient has nowhere to go, so the ripple collapses
+  // to plain magenta. The rainbow survives: its stops have ANSI equivalents.
+  if (level === 'ultracode') {
+    return TRUECOLOR ? spread(level, rippleAt) : sgr(RIPPLE.ansi)(level);
+  }
+  if (level === 'max') return spread(level, rainbowAt);
+
+  const known = EFFORT[level];
   // An unrecognised level still renders. Claude Code has added levels before
   // (xhigh, then ultracode); silently dropping the segment on the next one
   // would look like the feature broke rather than like the table is stale.
-  // Sliced rather than truncate()d — an ellipsis inside a badge this small
-  // costs more characters than it saves.
-  const tag = known ? known.tag : level.toUpperCase().slice(0, MAX_EFFORT_TAG);
-  const paint = known ? known.paint : (s) => C.magenta(s);
+  if (!known) return C.magenta(truncate(level, MAX_EFFORT_LABEL));
 
-  return paint(GLYPH.bolt + tag);
+  return sgr(TRUECOLOR ? fg(known.rgb) : String(known.ansi))(level);
 }
 
 let raw = '';
@@ -239,7 +394,7 @@ process.stdin.on('end', () => {
 
   // Beside the model, because the two are read together: which model, and how
   // hard it is being asked to think.
-  const effort = effortSegment(d.effort);
+  const effort = effortSegment(d);
   if (effort) parts.push(effort);
 
   const ctx = d.context_window && d.context_window.used_percentage;
