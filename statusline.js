@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Claude Code status line.
 // Reads the session JSON on stdin, prints one line:
-//   ▌ ~/dir │ main │ Opus 5 │ ctx 5% │ 5h 29% │ 7d 1%
+//   ▌ ~/dir │ main │ Opus 5 │ high │ @you │ ctx 5% │ 5h 29% │ 7d 1%
 //
 // Spawns nothing. The branch name is read straight out of .git/HEAD, so a
 // render can never contend with the git commands you are typing yourself.
@@ -10,6 +10,7 @@
 //   NO_COLOR / FORCE_COLOR=0 / TERM=dumb   drop colour
 //   FORCE_COLOR=1|2|3                      keep colour regardless
 //   CLAUDE_STATUSLINE_STYLE=ascii|unicode  force the glyph set
+//   CLAUDE_STATUSLINE_TRUECOLOR=0|1        force 24-bit colour off or on
 'use strict';
 
 const fs = require('fs');
@@ -28,6 +29,21 @@ function colorEnabled() {
   return true;
 }
 
+// 24-bit colour, needed only by the effort labels — everything else is 16-colour
+// and stays that way. COLORTERM is the standard signal but is frequently unset,
+// so the known-good terminals are accepted directly, the same way glyphs are
+// decided below. Apple_Terminal is the exception that has to be named: it sets
+// TERM_PROGRAM and tops out at 256 colours.
+function truecolorEnabled() {
+  const forced = env.CLAUDE_STATUSLINE_TRUECOLOR;
+  if (forced) return forced !== '0';
+  if (/^(truecolor|24bit)$/i.test(env.COLORTERM || '')) return true;
+  if (env.WT_SESSION) return true;
+
+  const prog = env.TERM_PROGRAM || '';
+  return Boolean(prog) && prog !== 'Apple_Terminal';
+}
+
 function unicodeEnabled() {
   const forced = (env.CLAUDE_STATUSLINE_STYLE || '').toLowerCase();
   if (forced === 'ascii') return false;
@@ -38,6 +54,7 @@ function unicodeEnabled() {
 }
 
 const COLOR = colorEnabled();
+const TRUECOLOR = COLOR && truecolorEnabled();
 
 const GLYPH = unicodeEnabled()
   ? { lead: '▌', sep: ' │ ', ellipsis: '…' }
@@ -181,6 +198,271 @@ function branchSegment(cwd) {
   return C.green(truncate(name, MAX_BRANCH));
 }
 
+// Reasoning effort, as set by /effort. Payload shape: {"effort":{"level":"high"}}.
+//
+// The level name is printed in the colour Claude Code paints it in its own
+// /effort menu, so the status line and the menu agree at a glance. Those colours
+// were read out of the Claude Code binary rather than eyeballed — the menu
+// defines low→warning, medium→success, high→permission, xhigh→autoAccept,
+// max→rainbow-animated, ultracode→violet-ripple, and each of those tokens
+// resolves to the values below.
+//
+// The last two are animations, and a status line cannot animate: it prints one
+// static string per render and has no say in when the next render happens. So
+// each is rendered as the spatial version of itself — the colour is spread
+// across the characters of the label instead of across time. The ripple becomes
+// a gradient, the rainbow becomes a spectrum. Standing still, but the same
+// colours in the same order.
+const EFFORT = {
+  low: { rgb: [255, 193, 7], ansi: 93 },     // warning
+  medium: { rgb: [78, 186, 101], ansi: 92 }, // success
+  high: { rgb: [87, 105, 247], ansi: 94 },   // permission
+  xhigh: { rgb: [208, 180, 255], ansi: 95 }, // autoAccept shimmer
+};
+
+// violet-ripple, interpolated over exactly the endpoints Claude Code uses.
+const RIPPLE = { from: [62, 22, 118], to: [140, 80, 240], ansi: 35 };
+
+// rainbow-animated, in ROYGBIV order, each with Claude Code's own ANSI fallback.
+const RAINBOW = [
+  { rgb: [235, 95, 87], ansi: 31 },
+  { rgb: [245, 139, 87], ansi: 91 },
+  { rgb: [250, 195, 95], ansi: 33 },
+  { rgb: [145, 200, 130], ansi: 32 },
+  { rgb: [130, 170, 220], ansi: 36 },
+  { rgb: [155, 130, 200], ansi: 34 },
+  { rgb: [200, 130, 180], ansi: 35 },
+];
+
+const MAX_EFFORT_LABEL = 12;
+const MAX_TRANSCRIPT_TAIL = 256 * 1024;
+
+// Reads the last `bytes` of a file. Returns null rather than throwing, and does
+// not care that the first line is probably cut in half — the caller parses line
+// by line and a broken line simply fails to parse.
+function readTail(file, bytes) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.allocUnsafe(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    return buf.toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+}
+
+// When this session's process started, from Claude Code's own session registry.
+//
+// This exists for one case: a resumed session keeps its transcript file but runs
+// as a new process, and ultracode does not survive a restart. Without this the
+// markers left by the previous run would be read as current state.
+function sessionStartedAt(sessionId) {
+  const home = os.homedir();
+  if (!home || !sessionId) return null;
+
+  const dir = path.join(home, '.claude', 'sessions');
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return null; }
+
+  for (const name of names) {
+    try {
+      const s = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (s.sessionId === sessionId && typeof s.startedAt === 'number') return s.startedAt;
+    } catch {}
+  }
+  return null;
+}
+
+// Is ultracode on? Claude Code will not say so in the payload — effort.level
+// reports the xhigh it genuinely applies — so the answer comes from the session
+// transcript, whose path the payload does hand over.
+//
+// Entering ultracode appends a record shaped like:
+//   {"attachment":{"type":"ultra_effort_enter","reminderType":"full"},"type":"attachment",…}
+// and leaving appends an ultra_effort_exit. Claude Code decides the live state by
+// scanning its message list backwards for whichever of the two is newest. This
+// runs the same scan over the same records, so the two agree by construction
+// rather than by coincidence.
+//
+// Every failure here returns false, which means the label falls back to the
+// plain level — under-claiming rather than asserting something untrue.
+function ultracodeActive(d) {
+  if (typeof d.transcript_path !== 'string' || !d.transcript_path) return false;
+
+  const tail = readTail(d.transcript_path, MAX_TRANSCRIPT_TAIL);
+  if (tail === null) return false;
+
+  const startedAt = sessionStartedAt(d.session_id);
+  const lines = tail.split('\n');
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    // Cheap filter first; the parse below is what actually decides. A transcript
+    // that merely quotes one of these records — a conversation about them, say —
+    // stores it as an escaped string inside a message and cannot survive the
+    // structural checks underneath.
+    if (lines[i].indexOf('ultra_effort_') === -1) continue;
+
+    let rec;
+    try { rec = JSON.parse(lines[i]); } catch { continue; }
+    if (!rec || rec.type !== 'attachment' || !rec.attachment) continue;
+    // Subagent traffic is interleaved into this same file and is not session state.
+    if (rec.isSidechain) continue;
+
+    const kind = rec.attachment.type;
+    if (kind !== 'ultra_effort_enter' && kind !== 'ultra_effort_exit') continue;
+
+    // Older than this run means it belongs to a run whose flag died with it.
+    if (startedAt !== null) {
+      const at = Date.parse(rec.timestamp);
+      if (Number.isFinite(at) && at < startedAt) return false;
+    }
+
+    return kind === 'ultra_effort_enter';
+  }
+
+  return false;
+}
+
+const fg = (rgb) => `38;2;${rgb[0]};${rgb[1]};${rgb[2]}`;
+const lerp = (a, b, t) => Math.round(a + (b - a) * t);
+
+// Paints each character with the colour at its own position along 0..1. A
+// single-character label sits at 0 rather than dividing by zero.
+function spread(label, codeAt) {
+  const n = label.length;
+  return Array.from(label, (ch, i) => sgr(codeAt(n > 1 ? i / (n - 1) : 0))(ch)).join('');
+}
+
+const rippleAt = (t) => fg([
+  lerp(RIPPLE.from[0], RIPPLE.to[0], t),
+  lerp(RIPPLE.from[1], RIPPLE.to[1], t),
+  lerp(RIPPLE.from[2], RIPPLE.to[2], t),
+]);
+
+// Stops are spread across the whole spectrum rather than taken in sequence, so
+// a three-character "max" still reads as a rainbow instead of as three reds.
+const rainbowAt = (t) => {
+  const stop = RAINBOW[Math.round(t * (RAINBOW.length - 1))];
+  return TRUECOLOR ? fg(stop.rgb) : String(stop.ansi);
+};
+
+function effortSegment(d) {
+  const value = d.effort && d.effort.level;
+  if (typeof value !== 'string' || !value.trim()) return null;
+
+  let level = value.trim().toLowerCase();
+
+  // Ultracode pins effort to xhigh, so xhigh is the only level that can be
+  // hiding it. Testing that first keeps every other level free of file reads.
+  if (level === 'xhigh' && ultracodeActive(d)) level = 'ultracode';
+
+  // Without 24-bit colour a gradient has nowhere to go, so the ripple collapses
+  // to plain magenta. The rainbow survives: its stops have ANSI equivalents.
+  if (level === 'ultracode') {
+    return TRUECOLOR ? spread(level, rippleAt) : sgr(RIPPLE.ansi)(level);
+  }
+  if (level === 'max') return spread(level, rainbowAt);
+
+  const known = EFFORT[level];
+  // An unrecognised level still renders. Claude Code has added levels before
+  // (xhigh, then ultracode); silently dropping the segment on the next one
+  // would look like the feature broke rather than like the table is stale.
+  if (!known) return C.magenta(truncate(level, MAX_EFFORT_LABEL));
+
+  return sgr(TRUECOLOR ? fg(known.rgb) : String(known.ansi))(level);
+}
+
+const MAX_LOGIN = 20;
+
+// Soft teal. Deliberately not blue: `high` is the commonest effort level and
+// Claude Code paints it rgb(87,105,247), which sat right beside this segment and
+// read as one long blue smear. Teal is far enough from that, from the bold cyan
+// of the directory, and from the green of the branch. The `@` is dimmed so the
+// login itself carries the colour.
+const ACCOUNT = { rgb: [126, 196, 184], ansi: 36 };
+
+// Which GitHub account is signed in, read from the GitHub CLI's hosts.yml.
+//
+// `gh auth status` answers this authoritatively, and is not used: it forks a
+// process and makes a network round trip, and this status line does neither.
+// hosts.yml is where gh persists the answer, so it is read straight off disk.
+//
+// The lookup order is gh's own, quoted from `gh help environment`: GH_CONFIG_DIR,
+// then $XDG_CONFIG_HOME/gh, then $AppData/GitHub CLI on Windows, then
+// ~/.config/gh. Exactly one directory is chosen, the same way gh chooses it —
+// falling through to a second candidate when the first has no hosts.yml would
+// report a login gh itself would ignore.
+function ghConfigDir() {
+  if (env.GH_CONFIG_DIR) return env.GH_CONFIG_DIR;
+  if (env.XDG_CONFIG_HOME) return path.join(env.XDG_CONFIG_HOME, 'gh');
+  // process.env is case-insensitive on Windows, so AppData matches APPDATA.
+  if (process.platform === 'win32' && env.AppData) return path.join(env.AppData, 'GitHub CLI');
+
+  const home = os.homedir();
+  return home ? path.join(home, '.config', 'gh') : null;
+}
+
+// hosts.yml is six lines of config in a fixed shape:
+//
+//   github.com:
+//       git_protocol: https
+//       users:
+//           someone:
+//       user: someone
+//
+// Only the host headers and each host's `user:` key are wanted, so they are
+// read line by line rather than by taking on a YAML dependency. A host header
+// is unindented and ends in a colon; `user:` is an indented key inside it.
+// `users:` is deliberately not matched — it heads a map of every account gh has
+// a token for, and the active one is `user:`.
+function parseHostsYml(text) {
+  const users = new Map();
+  let host = null;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+
+    const header = /^([^\s#][^:]*):\s*$/.exec(line);
+    if (header) {
+      host = header[1].trim();
+      continue;
+    }
+
+    const user = /^\s+user:\s*(.+?)\s*$/.exec(line);
+    // first wins, so a duplicated key cannot quietly override the real one
+    if (user && host && !users.has(host)) {
+      users.set(host, user[1].replace(/^["']|["']$/g, ''));
+    }
+  }
+
+  return users;
+}
+
+function ghUserSegment() {
+  const dir = ghConfigDir();
+  if (!dir) return null;
+
+  let text;
+  try {
+    text = fs.readFileSync(path.join(dir, 'hosts.yml'), 'utf8');
+  } catch {
+    return null; // gh not installed, or installed and never logged in
+  }
+
+  const users = parseHostsYml(text);
+  // github.com first. An enterprise-only setup falls back to whichever host it
+  // does have, since that login is the answer for that user.
+  const login = users.get('github.com') || users.values().next().value;
+  if (!login) return null;
+
+  return C.dim('@') + sgr(TRUECOLOR ? fg(ACCOUNT.rgb) : String(ACCOUNT.ansi))(truncate(login, MAX_LOGIN));
+}
+
 let raw = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => (raw += d));
@@ -195,6 +477,16 @@ process.stdin.on('end', () => {
   if (branch) parts.push(branch);
 
   if (d.model && d.model.display_name) parts.push(C.magenta(d.model.display_name));
+
+  // Beside the model, because the two are read together: which model, and how
+  // hard it is being asked to think.
+  const effort = effortSegment(d);
+  if (effort) parts.push(effort);
+
+  // Which account the push would go out as. Not derived from the payload —
+  // Claude Code does not report it — so it comes off disk.
+  const ghUser = ghUserSegment();
+  if (ghUser) parts.push(ghUser);
 
   const ctx = d.context_window && d.context_window.used_percentage;
   if (typeof ctx === 'number') parts.push(byLoad(ctx, `ctx ${asPct(ctx)}%`));

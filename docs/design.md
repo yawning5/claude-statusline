@@ -25,6 +25,7 @@ Claude Code pipes a session JSON object to the command on stdin. The fields used
 {
   "workspace": { "current_dir": "…" },     // falls back to cwd
   "model":     { "display_name": "…" },
+  "effort":    { "level": "high" },        // low|medium|high|xhigh|max|ultracode
   "context_window": { "used_percentage": 5 },
   "rate_limits": {
     "five_hour": { "used_percentage": 28.999999999999996, "resets_at": 1785308400 },
@@ -51,6 +52,172 @@ countdown is noise rather than information.
 
 Fixtures deliberately carry no `resets_at`. A hardcoded timestamp would make the suite pass
 today and fail next week, so countdown cases compute theirs relative to `Date.now()`.
+
+## Effort label
+
+`effort.level` is what `/effort` set. It is **not** in the status line JSON schema Claude
+Code documents, so it was confirmed the only way that settles it: by dumping the actual
+stdin of a live session, which carried `"effort": { "level": "high" }`. The level names
+were read out of the Claude Code binary rather than guessed — `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultracode` (xhigh plus dynamic workflow orchestration, session-scoped).
+
+### Borrowing Claude Code's palette
+
+The level is printed by name, in the colour Claude Code paints it in its own `/effort`
+menu. That menu's definition is in the binary, and it is the source of truth here:
+
+```js
+[{value:"low",       color:"warning"},
+ {value:"medium",    color:"success"},
+ {value:"high",      color:"permission"},
+ {value:"xhigh",     color:"autoAccept-shimmer"},
+ {value:"max",       color:"rainbow-animated"},
+ {value:"ultracode", color:"violet-ripple"}]
+```
+
+Each token resolves through Claude Code's theme, which ships both a 24-bit and a 16-colour
+version of itself — so the fallback below is also Claude Code's, not an invention:
+
+| Level | Token | 24-bit | 16-colour |
+|---|---|---|---|
+| `low` | `warning` | `rgb(255,193,7)` | `yellowBright` |
+| `medium` | `success` | `rgb(78,186,101)` | `greenBright` |
+| `high` | `permission` | `rgb(87,105,247)` | `blueBright` |
+| `xhigh` | `autoAccept-shimmer` | `rgb(208,180,255)` | `magentaBright` |
+| `max` | `rainbow-animated` | ROYGBIV stops | ROYGBIV stops |
+| `ultracode` | `violet-ripple` | `rgb(62,22,118)` → `rgb(140,80,240)` | — |
+
+### Animations that cannot animate
+
+`max` and `ultracode` are animated in Claude Code. A status line cannot be: it prints one
+static string per render and does not control when the next render happens. Faking motion
+was never on the table.
+
+What is on the table is the **spatial** version of each — the colour spread across the
+characters of the label instead of across time. `spread()` walks the label and paints each
+character at its own position along 0..1, so `ultracode` carries the full ripple gradient
+across its nine letters and `max` carries the spectrum across its three.
+
+`max`'s stops are spread across the whole rainbow rather than taken in order. Taking them
+in order would paint a three-character label red, orange, yellow — a fire, not a rainbow.
+
+The ripple endpoints are Claude Code's own, interpolated the same way it does. Note that
+`rainbow-animated` and `violet-ripple` have **no** entry in the 16-colour theme, because
+they are special-cased renderers rather than palette entries. So the rainbow keeps working
+without truecolor (its stops are ordinary palette colours) and the gradient does not —
+`ultracode` drops to plain magenta rather than pretending to be a gradient.
+
+### The one place 24-bit colour is used
+
+`truecolorEnabled()` follows the shape of `unicodeEnabled()`: `COLORTERM=truecolor|24bit`
+is the standard signal, `WT_SESSION` and `TERM_PROGRAM` are terminals known to support it
+while frequently leaving `COLORTERM` unset, and `CLAUDE_STATUSLINE_TRUECOLOR` overrides
+either way.
+
+`Apple_Terminal` has to be named explicitly as an exclusion. It sets `TERM_PROGRAM` and
+stops at 256 colours, so trusting `TERM_PROGRAM` blindly would send it escapes it cannot
+render.
+
+`test/run.js` pins `CLAUDE_STATUSLINE_TRUECOLOR=0` for every render that did not ask
+otherwise. `WT_SESSION` and `TERM_PROGRAM` are present on some developers' machines and
+absent on CI, and without pinning the same test would take different branches in the two
+places.
+
+An unrecognised level renders in magenta rather than dropping the segment. Two levels have
+been added upstream already; a segment that silently disappeared on the third would look
+like the feature broke, when the truth is that the table needs a line.
+
+### Recovering ultracode
+
+`ultracode` is the one level that never arrives. Establishing why took reading the binary,
+and the answer is that it is not a level at all:
+
+```js
+CD=["low","medium","high","xhigh","max"];lUc={med:"medium"},cUc={ultracode:"xhigh"}
+```
+
+It lives in an **alias** table, not the level vocabulary. Setting it splits into two facts
+written to two places — `{value:"xhigh",ultracode:!0}` — and the payload is built from only
+the first, through a function that whitelists against `CD`. So `effort.level` reports
+`xhigh`, which is not a bug: `xhigh` is genuinely the effort being applied.
+
+Three other routes were checked and ruled out with evidence:
+
+| Route | Verdict |
+|---|---|
+| `settings.json` | The `ultracode` key exists, but its own schema says *"interactive toggles never persist it"* — confirmed on disk: running `/effort ultracode` left the file byte-identical. |
+| Environment | The only effort reader is `CLAUDE_CODE_EFFORT_LEVEL`, which parses a level, not a flag. |
+| `~/.claude.json` unpin flags | Written by `/effort ultracode` — but also by plain `/effort xhigh`, and they are one-way latches. They cannot tell the two apart. |
+
+What does work is the session transcript. Claude Code appends
+`{"attachment":{"type":"ultra_effort_enter",…},"type":"attachment",…}` on entry and an
+`ultra_effort_exit` on the way out, and it decides the live state by scanning its message
+list backwards for whichever is newest:
+
+```js
+for(let i=e.length-1;i>=0;i--){let s=e[i];
+  if(s.type==="attachment"){if(s.attachment.type==="ultra_effort_enter"){n="enter";break}
+   if(s.attachment.type==="ultra_effort_exit"){n="exit";break}}
+```
+
+`ultracodeActive()` runs that same scan over the same records, reached through the
+`transcript_path` the payload already provides. This is deliberately a copy of the product's
+own state machine rather than a heuristic that happens to work.
+
+Four things make it safe to rely on:
+
+1. **Only `xhigh` triggers a read.** Ultracode pins effort to `xhigh`, so nothing else can
+   be hiding it — and nothing else pays for a file read.
+2. **The read is capped** at 256 KB from the end. The real marker in a heavy session sat
+   88 KB from EOF, so the cap is generous, but it is a cap: a marker beyond it under-claims.
+3. **The decision is a structural parse.** A substring match would be wrong, and provably
+   so — a transcript containing a *conversation about* these records is a real case, and it
+   was hit during development. Escaping saves a substring match by luck; `JSON.parse` plus a
+   `type`/`isSidechain` check saves it on purpose.
+4. **Markers older than this run are ignored.** A resumed session keeps its transcript but
+   starts a new process, and ultracode does not survive a restart. The run's start comes
+   from `~/.claude/sessions/<pid>.json`, matched on `session_id`.
+
+Every failure path returns false, so the label falls back to the plain level. The one place
+this can still assert something untrue is leaving ultracode: the exit marker is written on
+the next prompt, so `ultracode` lingers for a moment. Measured on real data: 10.4 s entering,
+6.0 s leaving.
+
+The format is internal and undocumented, unlike `transcript_path` itself, which is in the
+published status line schema. If it is renamed the scan finds nothing and the label quietly
+becomes `xhigh` again — the failure is a silent downgrade, not a break.
+
+## Account segment
+
+Claude Code reports nothing about git or GitHub accounts — the session JSON was dumped and
+checked, and there is no such field. So the answer comes off disk.
+
+Two different things could be called "the account", and the segment shows the second:
+
+| | Where it lives | What it decides |
+|---|---|---|
+| Commit identity | `user.name` / `user.email`, or the `GIT_AUTHOR_*` env vars | who a commit is authored by |
+| GitHub login | gh's `hosts.yml` | who a push or `gh pr create` authenticates as |
+
+`gh auth status` is the authoritative source for the second and is deliberately not used:
+it forks a process and makes a network round trip, and neither is acceptable on a line that
+re-renders constantly. `hosts.yml` is where gh persists the answer already.
+
+The config directory is resolved with gh's own precedence, quoted from `gh help
+environment`: `$GH_CONFIG_DIR`, then `$XDG_CONFIG_HOME/gh`, then `$AppData/GitHub CLI` on
+Windows, then `~/.config/gh`. **Exactly one directory is chosen**, the way gh chooses it.
+Falling through to the next candidate when the first has no `hosts.yml` was rejected: it
+would report a login gh itself would ignore, which is worse than reporting nothing.
+
+`parseHostsYml()` reads the file line by line instead of taking a YAML dependency, for six
+lines of config in a fixed shape. The one real trap is that `users:` and `user:` are both
+present and mean different things — `users:` heads the map of every account gh holds a
+token for, `user:` is the active one. Matching the wrong key shows whichever account
+happened to sort first, and there is a test pinning that.
+
+`GH_CONFIG_DIR` is also what makes this testable, and `test/run.js` sets it to a directory
+with no `hosts.yml` for every render that did not ask for an account. Without that, the
+suite would pass or fail depending on whether whoever runs it is logged into gh.
 
 ## Terminal handling
 

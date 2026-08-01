@@ -32,13 +32,25 @@ function eq(actual, expected, what) {
 
 // --- driving the script -----------------------------------------------------
 
-// Default to a deterministic rendering: no colour, forced unicode glyphs.
+// Default to a deterministic rendering: no colour, forced unicode glyphs, and
+// gh pointed at a config directory that holds no hosts.yml. Without that last
+// one the account segment would appear or not depending on whether whoever runs
+// the suite happens to be logged into gh, and every segment-index assertion
+// below would shift under them.
 function render(payload, extraEnv) {
   const input = typeof payload === 'string' ? payload : JSON.stringify(payload);
   const env = Object.assign(
     {},
     process.env,
-    { NO_COLOR: '1', CLAUDE_STATUSLINE_STYLE: 'unicode' },
+    {
+      NO_COLOR: '1',
+      CLAUDE_STATUSLINE_STYLE: 'unicode',
+      // Pinned, not detected: WT_SESSION and TERM_PROGRAM are truecolor signals
+      // and are set on some developers' machines and not on CI. Tests that care
+      // about 24-bit colour turn it on explicitly.
+      CLAUDE_STATUSLINE_TRUECOLOR: '0',
+      GH_CONFIG_DIR: path.join(TMP, 'no-gh'),
+    },
     extraEnv || {}
   );
   // an explicit undefined in extraEnv means "unset this variable"
@@ -220,6 +232,459 @@ check('the countdown takes the colour of the window it belongs to', () => {
   }
 });
 
+// --- effort badge -----------------------------------------------------------
+
+// The effort segment sits between the model and ctx, so with no model in the
+// payload it lands at index 1, right after the path.
+const effortOf = (level, extraEnv) =>
+  segments(render(
+    { workspace: { current_dir: '/srv/project/api' }, effort: level === undefined ? undefined : { level } },
+    extraEnv
+  ))[1];
+
+check('every level renders as its own name', () => {
+  for (const level of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']) {
+    eq(effortOf(level), level, level);
+  }
+});
+
+check('the effort label sits directly after the model', () => {
+  const s = segments(render(Object.assign({ effort: { level: 'high' } }, fixture('typical'))));
+  eq(s[1], 'Opus 5 (1M context)', 'model segment');
+  eq(s[2], 'high', 'effort segment');
+  eq(s[3], 'ctx 5%', 'context segment still follows');
+});
+
+check('a missing effort drops the segment entirely', () => {
+  const s = segments(render(fixture('typical')));
+  eq(s[1], 'Opus 5 (1M context)', 'model segment');
+  eq(s[2], 'ctx 5%', 'ctx follows the model with nothing between');
+});
+
+check('level casing and stray whitespace are tolerated', () => {
+  eq(effortOf('  XHigh '), 'xhigh', 'effort segment');
+});
+
+check('an unknown level still renders rather than vanishing', () => {
+  // Not a real level — a stand-in for whatever Claude Code adds next, which
+  // must surface rather than silently disappear.
+  eq(effortOf('not-a-real-level'), 'not-a-real-…', 'effort segment');
+});
+
+check('a non-string or empty level is ignored', () => {
+  for (const level of [null, 3, '', '   ']) {
+    const s = segments(render({ workspace: { current_dir: '/srv/project/api' }, effort: { level } }));
+    eq(s.length, 1, `segment count for level ${JSON.stringify(level)}`);
+  }
+  eq(segments(render({ workspace: { current_dir: '/srv/project/api' }, effort: {} })).length, 1, 'empty effort object');
+});
+
+// Claude Code's own /effort palette, read out of its binary. These are the
+// numbers the menu paints with, so a drift here is a real mismatch.
+const paintEffort = (level, extraEnv) => render(
+  { workspace: { current_dir: '/srv/project/api' }, effort: { level } },
+  Object.assign({ NO_COLOR: undefined }, extraEnv || {})
+);
+
+check('truecolor levels use Claude Code\'s own rgb values', () => {
+  const tc = { CLAUDE_STATUSLINE_TRUECOLOR: '1' };
+  const cases = [
+    ['low', '38;2;255;193;7'],
+    ['medium', '38;2;78;186;101'],
+    ['high', '38;2;87;105;247'],
+    ['xhigh', '38;2;208;180;255'],
+  ];
+  for (const [level, code] of cases) {
+    const want = `\x1b[${code}m${level}\x1b[0m`;
+    if (!paintEffort(level, tc).includes(want)) {
+      throw new Error(`${level} should be ${code}`);
+    }
+  }
+});
+
+check('16-colour levels fall back to Claude Code\'s own ansi values', () => {
+  const cases = [['low', 93], ['medium', 92], ['high', 94], ['xhigh', 95]];
+  for (const [level, code] of cases) {
+    if (!paintEffort(level).includes(`\x1b[${code}m${level}\x1b[0m`)) {
+      throw new Error(`${level} should be ansi ${code}`);
+    }
+  }
+});
+
+check('ultracode is a violet gradient across its characters', () => {
+  const out = paintEffort('ultracode', { CLAUDE_STATUSLINE_TRUECOLOR: '1' });
+  // The endpoints are Claude Code's: rgb(62,22,118) through rgb(140,80,240).
+  if (!out.includes('\x1b[38;2;62;22;118mu\x1b[0m')) throw new Error('should start at rgb(62,22,118)');
+  if (!out.includes('\x1b[38;2;140;80;240me\x1b[0m')) throw new Error('should end at rgb(140,80,240)');
+  eq(stripAnsi(out).split(' │ ')[1], 'ultracode', 'label under the colour');
+  // one colour per character, so nine characters means nine distinct codes
+  eq(new Set(out.match(/\x1b\[38;2;[0-9;]+m/g)).size, 9, 'distinct colours');
+});
+
+check('ultracode collapses to magenta without truecolor', () => {
+  // A gradient has nowhere to go in 16 colours, so it stops pretending.
+  if (!paintEffort('ultracode').includes('\x1b[35multracode\x1b[0m')) {
+    throw new Error('should be plain magenta');
+  }
+});
+
+check('max spreads the rainbow across its characters', () => {
+  const out = paintEffort('max', { CLAUDE_STATUSLINE_TRUECOLOR: '1' });
+  // Stops are spread over the whole spectrum, not taken in sequence, so a
+  // three-character label reads as a rainbow rather than as three reds.
+  if (!out.includes('\x1b[38;2;235;95;87mm\x1b[0m')) throw new Error('m should be rainbow red');
+  if (!out.includes('\x1b[38;2;145;200;130ma\x1b[0m')) throw new Error('a should be rainbow green');
+  if (!out.includes('\x1b[38;2;200;130;180mx\x1b[0m')) throw new Error('x should be rainbow violet');
+});
+
+check('the rainbow survives in 16 colours', () => {
+  const out = paintEffort('max');
+  eq(out.includes('\x1b[31mm\x1b[0m'), true, 'm red');
+  eq(out.includes('\x1b[32ma\x1b[0m'), true, 'a green');
+  eq(out.includes('\x1b[35mx\x1b[0m'), true, 'x magenta');
+});
+
+check('an unknown level is magenta', () => {
+  if (!paintEffort('not-a-real-level').includes('\x1b[95mnot-a-real-…\x1b[0m')) {
+    throw new Error('unknown should be magenta');
+  }
+});
+
+check('NO_COLOR strips the gradient too', () => {
+  const out = render({ workspace: { current_dir: '/srv/project/api' }, effort: { level: 'ultracode' } });
+  if (/\x1b\[/.test(out)) throw new Error(`expected no escapes, got ${JSON.stringify(out)}`);
+  eq(segments(out)[1], 'ultracode', 'effort segment');
+});
+
+check('level labels are ASCII in every style', () => {
+  for (const level of ['low', 'max', 'ultracode']) {
+    const out = render(
+      { workspace: { current_dir: '/srv/project/api' }, effort: { level } },
+      { CLAUDE_STATUSLINE_STYLE: 'ascii' }
+    );
+    if (/[^\x00-\x7f]/.test(out)) throw new Error(`non-ASCII byte in ${JSON.stringify(out)}`);
+  }
+});
+
+// --- truecolor detection ----------------------------------------------------
+
+const isTrue = (extraEnv) => /\x1b\[38;2;/.test(render(
+  { workspace: { current_dir: '/srv/project/api' }, effort: { level: 'high' } },
+  Object.assign({ NO_COLOR: undefined, CLAUDE_STATUSLINE_TRUECOLOR: undefined,
+                  COLORTERM: undefined, WT_SESSION: undefined, TERM_PROGRAM: undefined }, extraEnv || {})
+));
+
+check('COLORTERM=truecolor enables 24-bit colour', () => {
+  eq(isTrue({ COLORTERM: 'truecolor' }), true, 'truecolor');
+  eq(isTrue({ COLORTERM: '24bit' }), true, '24bit');
+});
+
+check('a bare terminal stays on 16 colours', () => {
+  eq(isTrue({}), false, 'nothing set');
+  eq(isTrue({ COLORTERM: '' }), false, 'empty COLORTERM');
+});
+
+check('Windows Terminal and known TERM_PROGRAMs are trusted', () => {
+  eq(isTrue({ WT_SESSION: 'abc' }), true, 'WT_SESSION');
+  eq(isTrue({ TERM_PROGRAM: 'iTerm.app' }), true, 'iTerm');
+  eq(isTrue({ TERM_PROGRAM: 'vscode' }), true, 'vscode');
+});
+
+check('Apple_Terminal is excluded, because it tops out at 256 colours', () => {
+  eq(isTrue({ TERM_PROGRAM: 'Apple_Terminal' }), false, 'Apple_Terminal');
+});
+
+check('CLAUDE_STATUSLINE_TRUECOLOR overrides the detection either way', () => {
+  eq(isTrue({ CLAUDE_STATUSLINE_TRUECOLOR: '1' }), true, 'forced on');
+  eq(isTrue({ CLAUDE_STATUSLINE_TRUECOLOR: '0', COLORTERM: 'truecolor' }), false, 'forced off');
+});
+
+check('NO_COLOR beats truecolor detection', () => {
+  const out = render(
+    { workspace: { current_dir: '/srv/project/api' }, effort: { level: 'high' } },
+    { COLORTERM: 'truecolor', CLAUDE_STATUSLINE_TRUECOLOR: undefined }
+  );
+  if (/\x1b\[/.test(out)) throw new Error('expected no escapes');
+});
+
+// --- github account ---------------------------------------------------------
+
+// Writes a hosts.yml into its own directory and renders with gh pointed there.
+function withHosts(name, contents, extraEnv) {
+  const dir = path.join(TMP, `gh-${name}`);
+  fs.mkdirSync(dir, { recursive: true });
+  if (contents !== null) fs.writeFileSync(path.join(dir, 'hosts.yml'), contents);
+  return segments(render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    Object.assign({ GH_CONFIG_DIR: dir }, extraEnv || {})
+  ));
+}
+
+const HOSTS = `github.com:
+    git_protocol: https
+    users:
+        yawning5:
+    user: yawning5
+`;
+
+check('the signed-in github account is shown', () => {
+  eq(withHosts('basic', HOSTS)[1], '@yawning5', 'account segment');
+});
+
+check('the account sits between effort and ctx', () => {
+  const dir = path.join(TMP, 'gh-order');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hosts.yml'), HOSTS);
+  const s = segments(render(
+    Object.assign({ effort: { level: 'high' } }, fixture('typical')),
+    { GH_CONFIG_DIR: dir }
+  ));
+  eq(s[1], 'Opus 5 (1M context)', 'model segment');
+  eq(s[2], 'high', 'effort segment');
+  eq(s[3], '@yawning5', 'account segment');
+  eq(s[4], 'ctx 5%', 'context segment still follows');
+});
+
+check('no hosts.yml drops the segment', () => {
+  eq(withHosts('absent', null).length, 1, 'segment count');
+});
+
+check('the users map is not mistaken for the active user', () => {
+  // `users:` heads every account gh holds a token for; `user:` is the active
+  // one. Matching the wrong key would show whichever account sorted first.
+  const s = withHosts('multiuser', `github.com:
+    users:
+        alice:
+        bob:
+    user: bob
+`);
+  eq(s[1], '@bob', 'account segment');
+});
+
+check('github.com wins over an enterprise host', () => {
+  const s = withHosts('multihost', `git.corp.example:
+    user: corpuser
+github.com:
+    user: yawning5
+`);
+  eq(s[1], '@yawning5', 'account segment');
+});
+
+check('an enterprise-only host is used when github.com is absent', () => {
+  eq(withHosts('enterprise', 'git.corp.example:\n    user: corpuser\n')[1], '@corpuser', 'account segment');
+});
+
+check('a quoted login is unwrapped', () => {
+  eq(withHosts('quoted', 'github.com:\n    user: "yawning5"\n')[1], '@yawning5', 'account segment');
+});
+
+check('a host block with no user drops the segment', () => {
+  eq(withHosts('nouser', 'github.com:\n    git_protocol: https\n').length, 1, 'segment count');
+});
+
+check('an empty or junk hosts.yml drops the segment', () => {
+  eq(withHosts('empty', '').length, 1, 'empty file');
+  eq(withHosts('junk', 'not yaml at all\n').length, 1, 'junk file');
+});
+
+check('CRLF line endings parse', () => {
+  eq(withHosts('crlf', 'github.com:\r\n    user: yawning5\r\n')[1], '@yawning5', 'account segment');
+});
+
+check('a long login is truncated', () => {
+  const s = withHosts('longlogin', 'github.com:\n    user: a-really-long-organisation-login\n');
+  if (s[1].length > 21) throw new Error(`account segment too long: ${JSON.stringify(s[1])}`);
+  if (!s[1].endsWith('…')) throw new Error(`expected an ellipsis, got ${JSON.stringify(s[1])}`);
+});
+
+check('XDG_CONFIG_HOME is honoured when GH_CONFIG_DIR is unset', () => {
+  const xdg = path.join(TMP, 'xdg');
+  fs.mkdirSync(path.join(xdg, 'gh'), { recursive: true });
+  fs.writeFileSync(path.join(xdg, 'gh', 'hosts.yml'), HOSTS);
+  const s = segments(render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    { GH_CONFIG_DIR: undefined, XDG_CONFIG_HOME: xdg }
+  ));
+  eq(s[1], '@yawning5', 'account segment');
+});
+
+check('GH_CONFIG_DIR beats XDG_CONFIG_HOME', () => {
+  // gh picks exactly one directory. Falling through to a second candidate when
+  // the first has no hosts.yml would report a login gh itself would ignore.
+  const xdg = path.join(TMP, 'xdg-loser');
+  fs.mkdirSync(path.join(xdg, 'gh'), { recursive: true });
+  fs.writeFileSync(path.join(xdg, 'gh', 'hosts.yml'), HOSTS);
+  eq(withHosts('empty-wins', null, { XDG_CONFIG_HOME: xdg }).length, 1, 'segment count');
+});
+
+check('the account renders with gh nowhere on PATH', () => {
+  const dir = path.join(TMP, 'gh-nopath');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hosts.yml'), HOSTS);
+  // Any implementation that shells out to `gh auth status` fails here.
+  const s = segments(render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    { GH_CONFIG_DIR: dir, PATH: '', PATHEXT: undefined }
+  ));
+  eq(s[1], '@yawning5', 'account segment');
+});
+
+check('the account is dim-@ plus a teal login', () => {
+  const dir = path.join(TMP, 'gh-colour');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hosts.yml'), HOSTS);
+  const paint = (extraEnv) => render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    Object.assign({ GH_CONFIG_DIR: dir, NO_COLOR: undefined }, extraEnv || {})
+  );
+
+  // Teal, not blue: `high` is the commonest effort level and Claude Code paints
+  // it rgb(87,105,247), which sits directly beside this segment.
+  const tc = paint({ CLAUDE_STATUSLINE_TRUECOLOR: '1' });
+  if (!tc.includes('\x1b[2m@\x1b[0m\x1b[38;2;126;196;184myawning5\x1b[0m')) {
+    throw new Error(`expected dim @ and a teal login, got ${JSON.stringify(tc)}`);
+  }
+
+  const ansi = paint();
+  if (!ansi.includes('\x1b[2m@\x1b[0m\x1b[36myawning5\x1b[0m')) {
+    throw new Error(`expected an ansi cyan fallback, got ${JSON.stringify(ansi)}`);
+  }
+});
+
+// --- ultracode detection ----------------------------------------------------
+
+// Ultracode never arrives in the payload — Claude Code reports the xhigh it
+// actually applies — so it is recovered from the session transcript. These build
+// one, in the shape Claude Code really writes.
+const SESSION = '11111111-2222-3333-4444-555555555555';
+const RUN_START = Date.parse('2026-08-01T01:00:00.000Z');
+
+const marker = (type, extra) => JSON.stringify(Object.assign({
+  parentUuid: 'a',
+  isSidechain: false,
+  attachment: type === 'enter' ? { type: 'ultra_effort_enter', reminderType: 'full' } : { type: 'ultra_effort_exit' },
+  type: 'attachment',
+  uuid: 'b',
+  timestamp: '2026-08-01T02:00:00.000Z',
+}, extra || {}));
+
+const CHATTER = JSON.stringify({ type: 'user', isSidechain: false, message: { role: 'user', content: 'hello' } });
+
+function effortWith(name, lines, opts) {
+  const o = opts || {};
+  const file = path.join(TMP, `transcript-${name}.jsonl`);
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+
+  // A home holding Claude Code's session registry, which the resume guard reads.
+  const home = path.join(TMP, `home-${name}`);
+  if (o.registry !== false) {
+    fs.mkdirSync(path.join(home, '.claude', 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'sessions', '4242.json'), JSON.stringify({
+      pid: 4242, sessionId: SESSION, startedAt: o.startedAt === undefined ? RUN_START : o.startedAt,
+    }));
+  } else {
+    fs.mkdirSync(home, { recursive: true });
+  }
+
+  return segments(render(
+    {
+      workspace: { current_dir: '/srv/project/api' },
+      effort: { level: o.level || 'xhigh' },
+      session_id: SESSION,
+      transcript_path: 'path' in o ? o.path : file,
+    },
+    Object.assign({ HOME: home, USERPROFILE: home }, o.env || {})
+  ))[1];
+}
+
+check('a newest enter marker renders ultracode instead of xhigh', () => {
+  eq(effortWith('enter', [CHATTER, marker('enter'), CHATTER]), 'ultracode', 'effort segment');
+});
+
+check('a newest exit marker leaves the plain level', () => {
+  eq(effortWith('exit', [marker('enter'), CHATTER, marker('exit')]), 'xhigh', 'effort segment');
+});
+
+check('re-entering after an exit wins again', () => {
+  eq(effortWith('reenter', [marker('enter'), marker('exit'), CHATTER, marker('enter')]), 'ultracode', 'effort segment');
+});
+
+check('a transcript with no markers leaves the plain level', () => {
+  eq(effortWith('none', [CHATTER, CHATTER]), 'xhigh', 'effort segment');
+});
+
+check('only xhigh is checked, because only xhigh can be hiding ultracode', () => {
+  // Every other level must not even reach for the file.
+  for (const level of ['low', 'medium', 'high', 'max']) {
+    eq(effortWith(`skip-${level}`, [marker('enter')], { level }), level, level);
+  }
+});
+
+check('a sidechain marker is not this session\'s state', () => {
+  // Subagent traffic is interleaved into the same transcript.
+  eq(effortWith('sidechain', [marker('enter', { isSidechain: true })]), 'xhigh', 'effort segment');
+});
+
+check('a transcript that merely quotes a marker does not trigger it', () => {
+  // A conversation *about* these records stores them escaped inside a message,
+  // which is why the decision is a structural parse and not a substring match.
+  const quoted = JSON.stringify({
+    type: 'assistant',
+    isSidechain: false,
+    message: { role: 'assistant', content: 'it writes {"attachment":{"type":"ultra_effort_enter"},"type":"attachment"} to the log' },
+  });
+  eq(effortWith('quoted', [quoted]), 'xhigh', 'effort segment');
+});
+
+check('a marker older than this run is ignored', () => {
+  // The resume case: same transcript, new process, ultracode did not survive.
+  eq(effortWith('stale', [marker('enter', { timestamp: '2026-08-01T00:30:00.000Z' })]), 'xhigh', 'effort segment');
+});
+
+check('a marker newer than this run is honoured', () => {
+  eq(effortWith('fresh', [marker('enter', { timestamp: '2026-08-01T01:30:00.000Z' })]), 'ultracode', 'effort segment');
+});
+
+check('no session registry still honours the marker', () => {
+  eq(effortWith('noreg', [marker('enter')], { registry: false }), 'ultracode', 'effort segment');
+});
+
+check('a missing or unreadable transcript leaves the plain level', () => {
+  eq(effortWith('nopath', [marker('enter')], { path: undefined }), 'xhigh', 'no transcript_path');
+  eq(effortWith('gone', [marker('enter')], { path: path.join(TMP, 'not-here.jsonl') }), 'xhigh', 'missing file');
+  eq(effortWith('empty-path', [marker('enter')], { path: '' }), 'xhigh', 'empty transcript_path');
+});
+
+check('junk lines around the marker do not stop it', () => {
+  eq(effortWith('junk', ['{ broken', 'not json at all', marker('enter'), '{"a":']), 'ultracode', 'effort segment');
+});
+
+check('the marker is found past a 256KB tail boundary only when inside it', () => {
+  // The read is capped, and the cap is a deliberate limit rather than a bug: a
+  // marker beyond it must under-claim, not be hunted for.
+  const filler = JSON.stringify({ type: 'user', isSidechain: false, message: { role: 'user', content: 'x'.repeat(2000) } });
+  const near = new Array(20).fill(filler);
+  eq(effortWith('within', [marker('enter'), ...near]), 'ultracode', 'inside the cap');
+  const far = new Array(200).fill(filler); // ~400KB of filler after the marker
+  eq(effortWith('beyond', [marker('enter'), ...far]), 'xhigh', 'beyond the cap');
+});
+
+check('the detected ultracode label gets the violet gradient', () => {
+  const file = path.join(TMP, 'transcript-colour.jsonl');
+  fs.writeFileSync(file, marker('enter') + '\n');
+  const out = render(
+    {
+      workspace: { current_dir: '/srv/project/api' },
+      effort: { level: 'xhigh' },
+      session_id: SESSION,
+      transcript_path: file,
+    },
+    { NO_COLOR: undefined, CLAUDE_STATUSLINE_TRUECOLOR: '1', HOME: TMP, USERPROFILE: TMP }
+  );
+  if (!out.includes('\x1b[38;2;62;22;118mu\x1b[0m')) throw new Error('should start at rgb(62,22,118)');
+  if (!out.includes('\x1b[38;2;140;80;240me\x1b[0m')) throw new Error('should end at rgb(140,80,240)');
+});
+
 // --- paths ------------------------------------------------------------------
 
 check('short paths are shown whole', () => {
@@ -305,8 +770,13 @@ check('FORCE_COLOR=1 beats NO_COLOR', () => {
   if (!/\x1b\[/.test(out)) throw new Error('expected ANSI escapes');
 });
 
-check('only 16-colour ANSI codes are emitted', () => {
-  const out = render(fixture('loaded'), { NO_COLOR: undefined });
+check('only 16-colour ANSI codes are emitted without truecolor', () => {
+  // The effort label is the one segment that can reach for 24-bit colour, so it
+  // is included here deliberately: with truecolor off nothing may escape 16.
+  const out = render(
+    Object.assign({ effort: { level: 'ultracode' } }, fixture('loaded')),
+    { NO_COLOR: undefined }
+  );
   const codes = out.match(/\x1b\[[0-9;]*m/g) || [];
   for (const code of codes) {
     if (/\x1b\[[34]8;/.test(code)) throw new Error(`256/truecolor escape found: ${JSON.stringify(code)}`);
