@@ -5,7 +5,7 @@
 A single-line status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
 
 ```
-▌ ~/dir │ main │ Opus 5 (1M context) │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
+▌ ~/dir │ main │ Opus 5 (1M context) │ ⚡H │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
 ```
 
 On a subscription the API-equivalent cost is not what constrains you, so this shows the
@@ -89,6 +89,7 @@ not on your `PATH` where Claude Code can see it.
 | `~/dir` | Working directory. Deep paths collapse to `root/…/parent/dir`. |
 | `main` | Git branch, read from `.git/HEAD`. Omitted outside a repo. Detached HEAD shows the short commit id. |
 | `Opus 5` | Active model. |
+| `⚡H` | Reasoning effort, as set by `/effort`. Omitted if Claude Code does not report one. |
 | `ctx 5%` | Context window used. |
 | `5h 29%` | 5-hour rate limit window used. |
 | `(2h13m)` | Time until that window resets. `6d3h`, `2h13m`, `47m`, `<1m`. Omitted if Claude Code does not report a reset time. |
@@ -104,6 +105,23 @@ than a missing asterisk. Branch name only, for free.
 
 Percentages turn green under 50%, yellow under 80%, red at or above. Values between 0 and
 1% render as `<1%` rather than rounding down to a misleading `0%`.
+
+The effort badge is a letter rather than the level name — the names are long enough to
+crowd the line, and this is a value you glance at to confirm, not read. Colour repeats the
+ordering, so it reads before the letter does:
+
+| `/effort` | Badge | Colour |
+|---|---|---|
+| `low` | `⚡L` | dim |
+| `medium` | `⚡M` | green |
+| `high` | `⚡H` | green |
+| `xhigh` | `⚡X` | yellow |
+| `max` | `⚡MAX` | red |
+| `ultracode` | `⚡UC` | red |
+| anything else | first 5 characters, uppercased | magenta |
+
+An unrecognised level still renders. Claude Code has added levels before, and a segment
+that silently vanished on the next one would look like a bug rather than a stale table.
 
 ## Terminal compatibility
 
@@ -123,8 +141,8 @@ Glyphs default to Unicode when the locale (`LC_ALL`/`LC_CTYPE`/`LANG`) says UTF-
 locale unset. Otherwise everything degrades to ASCII:
 
 ```
-▌ ~/dir │ main │ Opus 5 │ ctx 5% │ 5h 29% (2h13m)      unicode
-| ~/dir | main | Opus 5 | ctx 5% | 5h 29% (2h13m)      ascii
+▌ ~/dir │ main │ Opus 5 │ ⚡H │ ctx 5% │ 5h 29% (2h13m)      unicode
+| ~/dir | main | Opus 5 | *H | ctx 5% | 5h 29% (2h13m)      ascii
 ```
 
 Only the 16 basic ANSI colours are used, so it renders the same everywhere and inherits

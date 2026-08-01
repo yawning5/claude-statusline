@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Claude Code status line.
 // Reads the session JSON on stdin, prints one line:
-//   ▌ ~/dir │ main │ Opus 5 │ ctx 5% │ 5h 29% │ 7d 1%
+//   ▌ ~/dir │ main │ Opus 5 │ ⚡H │ ctx 5% │ 5h 29% │ 7d 1%
 //
 // Spawns nothing. The branch name is read straight out of .git/HEAD, so a
 // render can never contend with the git commands you are typing yourself.
@@ -39,9 +39,12 @@ function unicodeEnabled() {
 
 const COLOR = colorEnabled();
 
+// bolt: U+26A1 is emoji-presentation in most terminals, so it occupies two
+// columns. That is fine here — nothing in this line is column-aligned — but it
+// is exactly the kind of glyph the ascii fallback exists for.
 const GLYPH = unicodeEnabled()
-  ? { lead: '▌', sep: ' │ ', ellipsis: '…' }
-  : { lead: '|', sep: ' | ', ellipsis: '...' };
+  ? { lead: '▌', sep: ' │ ', ellipsis: '…', bolt: '⚡' }
+  : { lead: '|', sep: ' | ', ellipsis: '...', bolt: '*' };
 
 // 16-colour ANSI only — the one palette every terminal agrees on.
 const sgr = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -181,6 +184,44 @@ function branchSegment(cwd) {
   return C.green(truncate(name, MAX_BRANCH));
 }
 
+// Reasoning effort, as set by /effort. Payload shape: {"effort":{"level":"high"}}.
+//
+// Rendered as a one-or-two-character badge rather than the level name. The
+// names are long ("ultracode" alone is as wide as the whole rate-limit
+// segment) and this is a value you glance at to confirm, not read. Colour
+// carries the same ordering the tag does, so the badge is legible at a glance
+// even before the letter registers: quiet for low, green through the ordinary
+// range, then yellow and red as the setting gets expensive.
+const EFFORT = {
+  low: { tag: 'L', paint: (s) => C.dim(s) },
+  medium: { tag: 'M', paint: (s) => C.green(s) },
+  high: { tag: 'H', paint: (s) => C.green(s) },
+  xhigh: { tag: 'X', paint: (s) => C.yellow(s) },
+  max: { tag: 'MAX', paint: (s) => C.red(s) },
+  // ultracode is xhigh plus dynamic workflow orchestration, session-scoped.
+  ultracode: { tag: 'UC', paint: (s) => C.red(s) },
+};
+
+const MAX_EFFORT_TAG = 5;
+
+function effortSegment(effort) {
+  const value = effort && effort.level;
+  if (typeof value !== 'string' || !value.trim()) return null;
+
+  const level = value.trim().toLowerCase();
+  const known = EFFORT[level];
+
+  // An unrecognised level still renders. Claude Code has added levels before
+  // (xhigh, then ultracode); silently dropping the segment on the next one
+  // would look like the feature broke rather than like the table is stale.
+  // Sliced rather than truncate()d — an ellipsis inside a badge this small
+  // costs more characters than it saves.
+  const tag = known ? known.tag : level.toUpperCase().slice(0, MAX_EFFORT_TAG);
+  const paint = known ? known.paint : (s) => C.magenta(s);
+
+  return paint(GLYPH.bolt + tag);
+}
+
 let raw = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => (raw += d));
@@ -195,6 +236,11 @@ process.stdin.on('end', () => {
   if (branch) parts.push(branch);
 
   if (d.model && d.model.display_name) parts.push(C.magenta(d.model.display_name));
+
+  // Beside the model, because the two are read together: which model, and how
+  // hard it is being asked to think.
+  const effort = effortSegment(d.effort);
+  if (effort) parts.push(effort);
 
   const ctx = d.context_window && d.context_window.used_percentage;
   if (typeof ctx === 'number') parts.push(byLoad(ctx, `ctx ${asPct(ctx)}%`));

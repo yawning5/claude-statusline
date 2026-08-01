@@ -25,6 +25,7 @@ Claude Code pipes a session JSON object to the command on stdin. The fields used
 {
   "workspace": { "current_dir": "…" },     // falls back to cwd
   "model":     { "display_name": "…" },
+  "effort":    { "level": "high" },        // low|medium|high|xhigh|max|ultracode
   "context_window": { "used_percentage": 5 },
   "rate_limits": {
     "five_hour": { "used_percentage": 28.999999999999996, "resets_at": 1785308400 },
@@ -51,6 +52,28 @@ countdown is noise rather than information.
 
 Fixtures deliberately carry no `resets_at`. A hardcoded timestamp would make the suite pass
 today and fail next week, so countdown cases compute theirs relative to `Date.now()`.
+
+## Effort badge
+
+`effort.level` is what `/effort` set. It is **not** in the status line JSON schema Claude
+Code documents, so it was confirmed the only way that settles it: by dumping the actual
+stdin of a live session, which carried `"effort": { "level": "high" }`. The level names
+were read out of the Claude Code binary rather than guessed — `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultracode` (xhigh plus dynamic workflow orchestration, session-scoped).
+
+Rendered as `⚡H`, not `effort high`. Spelled out, the longest level is as wide as the whole
+rate-limit segment, and the badge is glanced at to confirm a setting rather than read.
+Colour repeats the ordering — dim, green, green, yellow, red, red — so the badge lands
+before the letter is parsed.
+
+An unrecognised level renders as its first five characters in magenta instead of dropping
+the segment. Two levels have been added upstream already; a segment that silently
+disappeared on the third would look like the feature broke, when the truth is that the
+table needs a line.
+
+Because `⚡` (U+26A1) carries emoji presentation, it is two columns wide in most terminals.
+Nothing on this line is column-aligned, so that is harmless — and the ASCII fallback swaps
+it for `*`, which `test/run.js` pins along with the rest of the no-non-ASCII guarantee.
 
 ## Terminal handling
 

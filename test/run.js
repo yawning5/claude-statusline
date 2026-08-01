@@ -220,6 +220,76 @@ check('the countdown takes the colour of the window it belongs to', () => {
   }
 });
 
+// --- effort badge -----------------------------------------------------------
+
+// The effort segment sits between the model and ctx, so with no model in the
+// payload it lands at index 1, right after the path.
+const effortOf = (level, extraEnv) =>
+  segments(render(
+    { workspace: { current_dir: '/srv/project/api' }, effort: level === undefined ? undefined : { level } },
+    extraEnv
+  ))[1];
+
+check('each known level renders its badge', () => {
+  eq(effortOf('low'), '⚡L', 'low');
+  eq(effortOf('medium'), '⚡M', 'medium');
+  eq(effortOf('high'), '⚡H', 'high');
+  eq(effortOf('xhigh'), '⚡X', 'xhigh');
+  eq(effortOf('max'), '⚡MAX', 'max');
+  eq(effortOf('ultracode'), '⚡UC', 'ultracode');
+});
+
+check('the badge sits directly after the model', () => {
+  const s = segments(render(Object.assign({ effort: { level: 'high' } }, fixture('typical'))));
+  eq(s[1], 'Opus 5 (1M context)', 'model segment');
+  eq(s[2], '⚡H', 'effort segment');
+  eq(s[3], 'ctx 5%', 'context segment still follows');
+});
+
+check('a missing effort drops the segment entirely', () => {
+  const s = segments(render(fixture('typical')));
+  eq(s[1], 'Opus 5 (1M context)', 'model segment');
+  eq(s[2], 'ctx 5%', 'ctx follows the model with nothing between');
+});
+
+check('level casing and stray whitespace are tolerated', () => {
+  eq(effortOf('  XHigh '), '⚡X', 'effort segment');
+});
+
+check('an unknown level still renders rather than vanishing', () => {
+  // A level added upstream must surface, not silently disappear.
+  eq(effortOf('galaxy'), '⚡GALAX', 'effort segment');
+});
+
+check('a non-string or empty level is ignored', () => {
+  for (const level of [null, 3, '', '   ']) {
+    const s = segments(render({ workspace: { current_dir: '/srv/project/api' }, effort: { level } }));
+    eq(s.length, 1, `segment count for level ${JSON.stringify(level)}`);
+  }
+  eq(segments(render({ workspace: { current_dir: '/srv/project/api' }, effort: {} })).length, 1, 'empty effort object');
+});
+
+check('the badge is coloured by level', () => {
+  const paint = (level) => render(
+    { workspace: { current_dir: '/srv/project/api' }, effort: { level } },
+    { NO_COLOR: undefined }
+  );
+  if (!/\x1b\[2m⚡L\x1b\[0m/.test(paint('low'))) throw new Error('low should be dim');
+  if (!/\x1b\[92m⚡H\x1b\[0m/.test(paint('high'))) throw new Error('high should be green');
+  if (!/\x1b\[93m⚡X\x1b\[0m/.test(paint('xhigh'))) throw new Error('xhigh should be yellow');
+  if (!/\x1b\[91m⚡MAX\x1b\[0m/.test(paint('max'))) throw new Error('max should be red');
+  if (!/\x1b\[95m⚡GALAX\x1b\[0m/.test(paint('galaxy'))) throw new Error('unknown should be magenta');
+});
+
+check('ascii style swaps the bolt for a plain marker', () => {
+  const out = render(
+    { workspace: { current_dir: '/srv/project/api' }, effort: { level: 'high' } },
+    { CLAUDE_STATUSLINE_STYLE: 'ascii' }
+  );
+  if (/[^\x00-\x7f]/.test(out)) throw new Error(`non-ASCII byte in ${JSON.stringify(out)}`);
+  eq(segments(out)[1], '*H', 'effort segment');
+});
+
 // --- paths ------------------------------------------------------------------
 
 check('short paths are shown whole', () => {
