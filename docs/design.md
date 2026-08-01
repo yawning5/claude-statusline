@@ -187,6 +187,38 @@ The format is internal and undocumented, unlike `transcript_path` itself, which 
 published status line schema. If it is renamed the scan finds nothing and the label quietly
 becomes `xhigh` again — the failure is a silent downgrade, not a break.
 
+## Account segment
+
+Claude Code reports nothing about git or GitHub accounts — the session JSON was dumped and
+checked, and there is no such field. So the answer comes off disk.
+
+Two different things could be called "the account", and the segment shows the second:
+
+| | Where it lives | What it decides |
+|---|---|---|
+| Commit identity | `user.name` / `user.email`, or the `GIT_AUTHOR_*` env vars | who a commit is authored by |
+| GitHub login | gh's `hosts.yml` | who a push or `gh pr create` authenticates as |
+
+`gh auth status` is the authoritative source for the second and is deliberately not used:
+it forks a process and makes a network round trip, and neither is acceptable on a line that
+re-renders constantly. `hosts.yml` is where gh persists the answer already.
+
+The config directory is resolved with gh's own precedence, quoted from `gh help
+environment`: `$GH_CONFIG_DIR`, then `$XDG_CONFIG_HOME/gh`, then `$AppData/GitHub CLI` on
+Windows, then `~/.config/gh`. **Exactly one directory is chosen**, the way gh chooses it.
+Falling through to the next candidate when the first has no `hosts.yml` was rejected: it
+would report a login gh itself would ignore, which is worse than reporting nothing.
+
+`parseHostsYml()` reads the file line by line instead of taking a YAML dependency, for six
+lines of config in a fixed shape. The one real trap is that `users:` and `user:` are both
+present and mean different things — `users:` heads the map of every account gh holds a
+token for, `user:` is the active one. Matching the wrong key shows whichever account
+happened to sort first, and there is a test pinning that.
+
+`GH_CONFIG_DIR` is also what makes this testable, and `test/run.js` sets it to a directory
+with no `hosts.yml` for every render that did not ask for an account. Without that, the
+suite would pass or fail depending on whether whoever runs it is logged into gh.
+
 ## Terminal handling
 
 **Colour is on by default and disabled only on an explicit signal** (`NO_COLOR`,

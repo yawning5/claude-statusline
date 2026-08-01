@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Claude Code status line.
 // Reads the session JSON on stdin, prints one line:
-//   ▌ ~/dir │ main │ Opus 5 │ high │ ctx 5% │ 5h 29% │ 7d 1%
+//   ▌ ~/dir │ main │ Opus 5 │ high │ @you │ ctx 5% │ 5h 29% │ 7d 1%
 //
 // Spawns nothing. The branch name is read straight out of .git/HEAD, so a
 // render can never contend with the git commands you are typing yourself.
@@ -377,6 +377,92 @@ function effortSegment(d) {
   return sgr(TRUECOLOR ? fg(known.rgb) : String(known.ansi))(level);
 }
 
+const MAX_LOGIN = 20;
+
+// Soft teal. Deliberately not blue: `high` is the commonest effort level and
+// Claude Code paints it rgb(87,105,247), which sat right beside this segment and
+// read as one long blue smear. Teal is far enough from that, from the bold cyan
+// of the directory, and from the green of the branch. The `@` is dimmed so the
+// login itself carries the colour.
+const ACCOUNT = { rgb: [126, 196, 184], ansi: 36 };
+
+// Which GitHub account is signed in, read from the GitHub CLI's hosts.yml.
+//
+// `gh auth status` answers this authoritatively, and is not used: it forks a
+// process and makes a network round trip, and this status line does neither.
+// hosts.yml is where gh persists the answer, so it is read straight off disk.
+//
+// The lookup order is gh's own, quoted from `gh help environment`: GH_CONFIG_DIR,
+// then $XDG_CONFIG_HOME/gh, then $AppData/GitHub CLI on Windows, then
+// ~/.config/gh. Exactly one directory is chosen, the same way gh chooses it —
+// falling through to a second candidate when the first has no hosts.yml would
+// report a login gh itself would ignore.
+function ghConfigDir() {
+  if (env.GH_CONFIG_DIR) return env.GH_CONFIG_DIR;
+  if (env.XDG_CONFIG_HOME) return path.join(env.XDG_CONFIG_HOME, 'gh');
+  // process.env is case-insensitive on Windows, so AppData matches APPDATA.
+  if (process.platform === 'win32' && env.AppData) return path.join(env.AppData, 'GitHub CLI');
+
+  const home = os.homedir();
+  return home ? path.join(home, '.config', 'gh') : null;
+}
+
+// hosts.yml is six lines of config in a fixed shape:
+//
+//   github.com:
+//       git_protocol: https
+//       users:
+//           someone:
+//       user: someone
+//
+// Only the host headers and each host's `user:` key are wanted, so they are
+// read line by line rather than by taking on a YAML dependency. A host header
+// is unindented and ends in a colon; `user:` is an indented key inside it.
+// `users:` is deliberately not matched — it heads a map of every account gh has
+// a token for, and the active one is `user:`.
+function parseHostsYml(text) {
+  const users = new Map();
+  let host = null;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+
+    const header = /^([^\s#][^:]*):\s*$/.exec(line);
+    if (header) {
+      host = header[1].trim();
+      continue;
+    }
+
+    const user = /^\s+user:\s*(.+?)\s*$/.exec(line);
+    // first wins, so a duplicated key cannot quietly override the real one
+    if (user && host && !users.has(host)) {
+      users.set(host, user[1].replace(/^["']|["']$/g, ''));
+    }
+  }
+
+  return users;
+}
+
+function ghUserSegment() {
+  const dir = ghConfigDir();
+  if (!dir) return null;
+
+  let text;
+  try {
+    text = fs.readFileSync(path.join(dir, 'hosts.yml'), 'utf8');
+  } catch {
+    return null; // gh not installed, or installed and never logged in
+  }
+
+  const users = parseHostsYml(text);
+  // github.com first. An enterprise-only setup falls back to whichever host it
+  // does have, since that login is the answer for that user.
+  const login = users.get('github.com') || users.values().next().value;
+  if (!login) return null;
+
+  return C.dim('@') + sgr(TRUECOLOR ? fg(ACCOUNT.rgb) : String(ACCOUNT.ansi))(truncate(login, MAX_LOGIN));
+}
+
 let raw = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => (raw += d));
@@ -396,6 +482,11 @@ process.stdin.on('end', () => {
   // hard it is being asked to think.
   const effort = effortSegment(d);
   if (effort) parts.push(effort);
+
+  // Which account the push would go out as. Not derived from the payload —
+  // Claude Code does not report it — so it comes off disk.
+  const ghUser = ghUserSegment();
+  if (ghUser) parts.push(ghUser);
 
   const ctx = d.context_window && d.context_window.used_percentage;
   if (typeof ctx === 'number') parts.push(byLoad(ctx, `ctx ${asPct(ctx)}%`));

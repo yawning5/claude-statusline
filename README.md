@@ -5,7 +5,7 @@
 A single-line status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
 
 ```
-▌ ~/dir │ main │ Opus 5 (1M context) │ high │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
+▌ ~/dir │ main │ Opus 5 (1M context) │ high │ @you │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
 ```
 
 On a subscription the API-equivalent cost is not what constrains you, so this shows the
@@ -90,6 +90,7 @@ not on your `PATH` where Claude Code can see it.
 | `main` | Git branch, read from `.git/HEAD`. Omitted outside a repo. Detached HEAD shows the short commit id. |
 | `Opus 5` | Active model. |
 | `high` | Reasoning effort, as set by `/effort`, in Claude Code's own colour for that level. |
+| `@you` | GitHub account signed in to the GitHub CLI. Omitted if `gh` is absent or logged out. |
 | `ctx 5%` | Context window used. |
 | `5h 29%` | 5-hour rate limit window used. |
 | `(2h13m)` | Time until that window resets. `6d3h`, `2h13m`, `47m`, `<1m`. Omitted if Claude Code does not report a reset time. |
@@ -178,6 +179,27 @@ over-claims (you see `ultracode` briefly) until the next prompt corrects it.
 If the record format ever changes, the scan finds nothing and the label falls back to
 `xhigh`. That degradation is silent by design — under-claiming beats inventing.
 
+## The account segment
+
+`@you` is the account **signed in to the GitHub CLI** — the one a `gh pr create` or an
+authenticated push goes out as. It is read from gh's `hosts.yml`, never from `gh auth
+status`, so it costs no subprocess and no network call. gh's own directory order is
+followed exactly (`gh help environment`):
+
+| Looked up | When |
+|---|---|
+| `$GH_CONFIG_DIR` | set |
+| `$XDG_CONFIG_HOME/gh` | `XDG_CONFIG_HOME` set |
+| `$AppData/GitHub CLI` | Windows, `AppData` set |
+| `~/.config/gh` | otherwise |
+
+`github.com` is preferred; an enterprise-only setup shows that host's login instead. No
+`gh`, no `hosts.yml`, or logged out — the segment is simply absent.
+
+**This is not your commit identity.** `user.name` / `user.email` decide who a commit is
+authored by, and they can differ from the signed-in account; this segment does not claim
+otherwise.
+
 ## Terminal compatibility
 
 Colour and glyphs adapt automatically, and can be forced:
@@ -198,16 +220,16 @@ Glyphs default to Unicode when the locale (`LC_ALL`/`LC_CTYPE`/`LANG`) says UTF-
 locale unset. Otherwise everything degrades to ASCII:
 
 ```
-▌ ~/dir │ main │ Opus 5 │ high │ ctx 5% │ 5h 29% (2h13m)      unicode
-| ~/dir | main | Opus 5 | high | ctx 5% | 5h 29% (2h13m)      ascii
+▌ ~/dir │ main │ Opus 5 │ high │ @you │ ctx 5% │ 5h 29% (2h13m)      unicode
+| ~/dir | main | Opus 5 | high | @you | ctx 5% | 5h 29% (2h13m)      ascii
 ```
 
-Every segment but one uses only the 16 basic ANSI colours, so it renders the same
-everywhere and inherits your terminal theme. **The effort label is the exception**:
-matching Claude Code's own palette needs 24-bit colour, so it emits `38;2;r;g;b` when the
+Most segments use only the 16 basic ANSI colours, so they render the same everywhere and
+inherit your terminal theme. **The effort label and the account login are the exceptions**:
+matching Claude Code's own palette needs 24-bit colour, so they emit `38;2;r;g;b` when the
 terminal advertises support — `COLORTERM=truecolor`/`24bit`, `WT_SESSION`, or any
 `TERM_PROGRAM` other than `Apple_Terminal`, which sets it but stops at 256 colours.
-Everywhere else it falls back to 16 colours. Nothing emits 256-colour escapes.
+Everywhere else both fall back to 16 colours. Nothing emits 256-colour escapes.
 
 Set these in your shell profile, not in the `statusLine` command — Claude Code runs the
 command through your shell, so the environment carries over.

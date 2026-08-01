@@ -32,7 +32,11 @@ function eq(actual, expected, what) {
 
 // --- driving the script -----------------------------------------------------
 
-// Default to a deterministic rendering: no colour, forced unicode glyphs.
+// Default to a deterministic rendering: no colour, forced unicode glyphs, and
+// gh pointed at a config directory that holds no hosts.yml. Without that last
+// one the account segment would appear or not depending on whether whoever runs
+// the suite happens to be logged into gh, and every segment-index assertion
+// below would shift under them.
 function render(payload, extraEnv) {
   const input = typeof payload === 'string' ? payload : JSON.stringify(payload);
   const env = Object.assign(
@@ -45,6 +49,7 @@ function render(payload, extraEnv) {
       // and are set on some developers' machines and not on CI. Tests that care
       // about 24-bit colour turn it on explicitly.
       CLAUDE_STATUSLINE_TRUECOLOR: '0',
+      GH_CONFIG_DIR: path.join(TMP, 'no-gh'),
     },
     extraEnv || {}
   );
@@ -400,6 +405,150 @@ check('NO_COLOR beats truecolor detection', () => {
     { COLORTERM: 'truecolor', CLAUDE_STATUSLINE_TRUECOLOR: undefined }
   );
   if (/\x1b\[/.test(out)) throw new Error('expected no escapes');
+});
+
+// --- github account ---------------------------------------------------------
+
+// Writes a hosts.yml into its own directory and renders with gh pointed there.
+function withHosts(name, contents, extraEnv) {
+  const dir = path.join(TMP, `gh-${name}`);
+  fs.mkdirSync(dir, { recursive: true });
+  if (contents !== null) fs.writeFileSync(path.join(dir, 'hosts.yml'), contents);
+  return segments(render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    Object.assign({ GH_CONFIG_DIR: dir }, extraEnv || {})
+  ));
+}
+
+const HOSTS = `github.com:
+    git_protocol: https
+    users:
+        yawning5:
+    user: yawning5
+`;
+
+check('the signed-in github account is shown', () => {
+  eq(withHosts('basic', HOSTS)[1], '@yawning5', 'account segment');
+});
+
+check('the account sits between effort and ctx', () => {
+  const dir = path.join(TMP, 'gh-order');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hosts.yml'), HOSTS);
+  const s = segments(render(
+    Object.assign({ effort: { level: 'high' } }, fixture('typical')),
+    { GH_CONFIG_DIR: dir }
+  ));
+  eq(s[1], 'Opus 5 (1M context)', 'model segment');
+  eq(s[2], 'high', 'effort segment');
+  eq(s[3], '@yawning5', 'account segment');
+  eq(s[4], 'ctx 5%', 'context segment still follows');
+});
+
+check('no hosts.yml drops the segment', () => {
+  eq(withHosts('absent', null).length, 1, 'segment count');
+});
+
+check('the users map is not mistaken for the active user', () => {
+  // `users:` heads every account gh holds a token for; `user:` is the active
+  // one. Matching the wrong key would show whichever account sorted first.
+  const s = withHosts('multiuser', `github.com:
+    users:
+        alice:
+        bob:
+    user: bob
+`);
+  eq(s[1], '@bob', 'account segment');
+});
+
+check('github.com wins over an enterprise host', () => {
+  const s = withHosts('multihost', `git.corp.example:
+    user: corpuser
+github.com:
+    user: yawning5
+`);
+  eq(s[1], '@yawning5', 'account segment');
+});
+
+check('an enterprise-only host is used when github.com is absent', () => {
+  eq(withHosts('enterprise', 'git.corp.example:\n    user: corpuser\n')[1], '@corpuser', 'account segment');
+});
+
+check('a quoted login is unwrapped', () => {
+  eq(withHosts('quoted', 'github.com:\n    user: "yawning5"\n')[1], '@yawning5', 'account segment');
+});
+
+check('a host block with no user drops the segment', () => {
+  eq(withHosts('nouser', 'github.com:\n    git_protocol: https\n').length, 1, 'segment count');
+});
+
+check('an empty or junk hosts.yml drops the segment', () => {
+  eq(withHosts('empty', '').length, 1, 'empty file');
+  eq(withHosts('junk', 'not yaml at all\n').length, 1, 'junk file');
+});
+
+check('CRLF line endings parse', () => {
+  eq(withHosts('crlf', 'github.com:\r\n    user: yawning5\r\n')[1], '@yawning5', 'account segment');
+});
+
+check('a long login is truncated', () => {
+  const s = withHosts('longlogin', 'github.com:\n    user: a-really-long-organisation-login\n');
+  if (s[1].length > 21) throw new Error(`account segment too long: ${JSON.stringify(s[1])}`);
+  if (!s[1].endsWith('…')) throw new Error(`expected an ellipsis, got ${JSON.stringify(s[1])}`);
+});
+
+check('XDG_CONFIG_HOME is honoured when GH_CONFIG_DIR is unset', () => {
+  const xdg = path.join(TMP, 'xdg');
+  fs.mkdirSync(path.join(xdg, 'gh'), { recursive: true });
+  fs.writeFileSync(path.join(xdg, 'gh', 'hosts.yml'), HOSTS);
+  const s = segments(render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    { GH_CONFIG_DIR: undefined, XDG_CONFIG_HOME: xdg }
+  ));
+  eq(s[1], '@yawning5', 'account segment');
+});
+
+check('GH_CONFIG_DIR beats XDG_CONFIG_HOME', () => {
+  // gh picks exactly one directory. Falling through to a second candidate when
+  // the first has no hosts.yml would report a login gh itself would ignore.
+  const xdg = path.join(TMP, 'xdg-loser');
+  fs.mkdirSync(path.join(xdg, 'gh'), { recursive: true });
+  fs.writeFileSync(path.join(xdg, 'gh', 'hosts.yml'), HOSTS);
+  eq(withHosts('empty-wins', null, { XDG_CONFIG_HOME: xdg }).length, 1, 'segment count');
+});
+
+check('the account renders with gh nowhere on PATH', () => {
+  const dir = path.join(TMP, 'gh-nopath');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hosts.yml'), HOSTS);
+  // Any implementation that shells out to `gh auth status` fails here.
+  const s = segments(render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    { GH_CONFIG_DIR: dir, PATH: '', PATHEXT: undefined }
+  ));
+  eq(s[1], '@yawning5', 'account segment');
+});
+
+check('the account is dim-@ plus a teal login', () => {
+  const dir = path.join(TMP, 'gh-colour');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'hosts.yml'), HOSTS);
+  const paint = (extraEnv) => render(
+    { workspace: { current_dir: '/srv/project/api' } },
+    Object.assign({ GH_CONFIG_DIR: dir, NO_COLOR: undefined }, extraEnv || {})
+  );
+
+  // Teal, not blue: `high` is the commonest effort level and Claude Code paints
+  // it rgb(87,105,247), which sits directly beside this segment.
+  const tc = paint({ CLAUDE_STATUSLINE_TRUECOLOR: '1' });
+  if (!tc.includes('\x1b[2m@\x1b[0m\x1b[38;2;126;196;184myawning5\x1b[0m')) {
+    throw new Error(`expected dim @ and a teal login, got ${JSON.stringify(tc)}`);
+  }
+
+  const ansi = paint();
+  if (!ansi.includes('\x1b[2m@\x1b[0m\x1b[36myawning5\x1b[0m')) {
+    throw new Error(`expected an ansi cyan fallback, got ${JSON.stringify(ansi)}`);
+  }
 });
 
 // --- ultracode detection ----------------------------------------------------
