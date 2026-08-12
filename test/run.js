@@ -50,6 +50,10 @@ function render(payload, extraEnv) {
       // about 24-bit colour turn it on explicitly.
       CLAUDE_STATUSLINE_TRUECOLOR: '0',
       GH_CONFIG_DIR: path.join(TMP, 'no-gh'),
+      // Unset for the same reason: with a width in hand the script may wrap to
+      // two rows, and every segment-index assertion below reads the first one.
+      // The wrapping cases set it explicitly.
+      COLUMNS: undefined,
     },
     extraEnv || {}
   );
@@ -809,6 +813,125 @@ check('UTF-8 locale selects unicode glyphs', () => {
     LANG: 'en_US.UTF-8',
   });
   if (!out.startsWith('▌ ')) throw new Error(`expected the unicode lead glyph, got ${JSON.stringify(out)}`);
+});
+
+// --- two-line wrapping ------------------------------------------------------
+
+// Every usage segment present, so the wrap has something to move, and a short
+// fixed path so these cases turn on the width of the whole line rather than on
+// where the suite happens to be checked out.
+const WRAPPABLE = {
+  workspace: { current_dir: '/srv/api' },
+  model: { display_name: 'Opus 5 (1M context)' },
+  effort: { level: 'high' },
+  context_window: { used_percentage: 5 },
+  rate_limits: { five_hour: { used_percentage: 29 }, seven_day: { used_percentage: 1 } },
+};
+
+// "▌ a │ b\n▌ c" -> [["a", "b"], ["c"]]
+const rows = (out) => stripAnsi(out).split('\n').map((l) => l.slice(2).split(/ [│|] /));
+
+const wrapped = (out) => out.includes('\n');
+
+// The width of the unwrapped render. Every character in it is one cell wide, so
+// its length in characters is also its width in cells — which is exactly what
+// the wide-character case further down stops being true.
+const ONE_LINE = stripAnsi(render(WRAPPABLE, { COLUMNS: undefined })).length;
+
+check('an unknown terminal width never wraps', () => {
+  // Claude Code only started setting COLUMNS in v2.1.153. On anything older
+  // this has to keep printing the single line it always did.
+  eq(wrapped(render(WRAPPABLE, { COLUMNS: undefined })), false, 'wrapped');
+});
+
+check('a line that fits stays on one row', () => {
+  eq(wrapped(render(WRAPPABLE, { COLUMNS: '200' })), false, 'wrapped');
+});
+
+check('a line that overflows moves the usage segments to a second row', () => {
+  const r = rows(render(WRAPPABLE, { COLUMNS: '40' }));
+  eq(r.length, 2, 'row count');
+  eq(r[0].join('|'), '/srv/api|Opus 5 (1M context)|high', 'first row');
+  eq(r[1].join('|'), 'ctx 5%|5h 29%|7d 1%', 'second row');
+});
+
+check('both rows carry the lead glyph', () => {
+  const lines = stripAnsi(render(WRAPPABLE, { COLUMNS: '40' })).split('\n');
+  for (const [i, l] of lines.entries()) {
+    if (!l.startsWith('▌ ')) throw new Error(`row ${i} lacks the lead glyph: ${JSON.stringify(l)}`);
+  }
+});
+
+check('the ascii style wraps with the ascii lead', () => {
+  const out = render(WRAPPABLE, { COLUMNS: '40', CLAUDE_STATUSLINE_STYLE: 'ascii' });
+  if (/[^\x00-\x7f\n]/.test(out)) throw new Error(`non-ASCII byte in ${JSON.stringify(out)}`);
+  for (const l of out.split('\n')) {
+    if (!l.startsWith('| ')) throw new Error(`row lacks the ascii lead: ${JSON.stringify(l)}`);
+  }
+});
+
+check('a line exactly as wide as the terminal is left alone', () => {
+  eq(wrapped(render(WRAPPABLE, { COLUMNS: String(ONE_LINE) })), false, 'wrapped');
+});
+
+check('one cell narrower than the terminal is the point it splits', () => {
+  eq(wrapped(render(WRAPPABLE, { COLUMNS: String(ONE_LINE - 1) })), true, 'wrapped');
+});
+
+check('a payload with no usage segments never grows an empty second row', () => {
+  // Without this guard the split would still fire and print a bare "▌ ".
+  const out = render({ workspace: { current_dir: '/srv/api' } }, { COLUMNS: '1' });
+  eq(wrapped(out), false, 'wrapped');
+});
+
+check('a junk COLUMNS is ignored rather than guessed at', () => {
+  for (const bad of ['0', '-5', 'abc', '', ' ']) {
+    eq(wrapped(render(WRAPPABLE, { COLUMNS: bad })), false, `wrapped on COLUMNS=${JSON.stringify(bad)}`);
+  }
+});
+
+check('a fractional COLUMNS truncates rather than disabling the wrap', () => {
+  eq(wrapped(render(WRAPPABLE, { COLUMNS: `${ONE_LINE - 1}.9` })), true, 'wrapped');
+});
+
+check('colour escapes are not counted toward the width', () => {
+  // A coloured render is several times longer in bytes than in cells. Measuring
+  // the raw string would split a line that fits the terminal perfectly well.
+  const out = render(WRAPPABLE, {
+    NO_COLOR: undefined,
+    FORCE_COLOR: '1',
+    COLUMNS: String(ONE_LINE),
+  });
+  if (!/\x1b\[/.test(out)) throw new Error('expected ANSI escapes');
+  eq(wrapped(out), false, 'wrapped');
+});
+
+// Six Hangul syllables are six characters and twelve cells. The ASCII path
+// beside it is six characters and six cells, so the two renders have identical
+// character counts and differ by six in width — which is the whole point: a
+// String.length check cannot tell them apart, and a terminal can.
+const HANGUL = Object.assign({}, WRAPPABLE, { workspace: { current_dir: '/srv/프로젝트관리' } });
+const ASCII_6 = Object.assign({}, WRAPPABLE, { workspace: { current_dir: '/srv/abcdef' } });
+
+check('wide characters are measured as two cells', () => {
+  const chars = stripAnsi(render(ASCII_6, { COLUMNS: undefined })).length;
+  eq(stripAnsi(render(HANGUL, { COLUMNS: undefined })).length, chars, 'character counts match');
+
+  eq(wrapped(render(ASCII_6, { COLUMNS: String(chars) })), false, 'the ascii path wrapped');
+  eq(wrapped(render(HANGUL, { COLUMNS: String(chars) })), true, 'the hangul path did not wrap');
+});
+
+check('a decomposed hangul path measures like its composed form', () => {
+  // NFD is what a macOS filesystem hands over: each syllable arrives as a
+  // leading jamo plus one or two conjoining ones that compose into a single
+  // cell. Counted naively that is a path twice as wide as it renders.
+  const nfd = Object.assign({}, WRAPPABLE, {
+    workspace: { current_dir: '/srv/프로젝트관리'.normalize('NFD') },
+  });
+  const chars = stripAnsi(render(ASCII_6, { COLUMNS: undefined })).length;
+
+  eq(wrapped(render(nfd, { COLUMNS: String(chars) })), true, 'wrapped like the composed form');
+  eq(wrapped(render(nfd, { COLUMNS: String(chars + 6) })), false, 'wrapped six cells wider');
 });
 
 // --- git segment ------------------------------------------------------------

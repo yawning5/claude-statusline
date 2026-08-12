@@ -235,6 +235,69 @@ Glyphs default to Unicode when the locale reports UTF-8, or when `TERM_PROGRAM` 
 `WT_SESSION` is present — those terminals handle UTF-8 but frequently leave the locale
 unset. `CLAUDE_STATUSLINE_STYLE` overrides the detection in either direction.
 
+## Two rows
+
+The line outgrew narrow terminals. Directory, branch, model, effort, account and three
+usage figures come to something like 110 cells with a long model name, and Claude Code's own
+advice for output past the width is that it "may get truncated or wrap awkwardly" — the
+wrap point falling wherever the terminal happens to put it, mid-segment as often as not.
+
+So it splits itself, on a seam chosen rather than found:
+
+```
+▌ ~/dir │ main │ Opus 5 (1M context) │ high │ @you     which session is this
+▌ ctx 5% │ 5h 29% (2h13m) │ 7d 1%                      what it has spent
+```
+
+Everything above the seam answers *which session is this*, and holds still — the eye learns
+where the branch name sits and keeps finding it there. Everything below is a number that
+moves on its own while you work. Splitting anywhere else would put two halves of one thought
+on two rows.
+
+**Only when it does not fit.** A line that fits stays on one row; spending a second row to
+say the same thing is a real cost in a terminal.
+
+### Knowing the width
+
+`process.stdout.columns` is undefined and `tput cols` reads nothing, for the same reason
+`isTTY` lies: the output is captured through a pipe, and there is no terminal on this end of
+it. The width arrives out of band instead — Claude Code sets `COLUMNS` and `LINES` to the
+current dimensions before running the command, as of v2.1.153.
+
+Anything older does not set it. That case wraps never, rather than guessing at 80: the
+single long line is what those versions have always printed, and a guess that comes in low
+would split lines that fit.
+
+### Measuring it
+
+Not `String.length`. Two things make the rendered string longer or shorter than the space it
+occupies:
+
+- **Colour escapes.** A coloured render is several times its own width in bytes.
+- **Wide characters.** A Korean path is the case that matters here — `~/프로젝트관리` is six
+  characters and twelve cells. Measured as ASCII it reads six cells narrower than it draws,
+  so the line overflows the terminal while the code believes it fits. Which is the precise
+  failure the wrap exists to prevent, arrived at by way of the wrap.
+
+`displayWidth` strips the escapes and walks code points, charging two cells for the East
+Asian Wide and Fullwidth ranges, zero for combining marks and the conjoining Hangul jamo — a
+decomposed path from a macOS filesystem is two or three code points per cell — and one for
+everything else. `test/run.js` pins this with a pair of renders that have *identical*
+character counts and differ by six cells, so a regression to `.length` fails rather than
+passing quietly.
+
+Ambiguous-width characters are charged one cell. The `│` separator is one of them, so a
+terminal explicitly configured to draw CJK ambiguous characters double width wraps slightly
+later than it should. The alternative misjudges every terminal that is not.
+
+### Rejected
+
+- **Always two rows.** Stable, and wasteful on the wide terminal most sessions run in.
+- **Truncating segments to fit.** The usage figures are the reason this status line exists;
+  eliding them to keep one row inverts the priority.
+- **Reflowing segment by segment.** More rows, no fixed place for anything, and the layout
+  changing shape as a percentage crosses from `9%` to `10%`.
+
 ## Branch segment
 
 **The status line spawns no processes.** The branch name is read from `.git/HEAD`.

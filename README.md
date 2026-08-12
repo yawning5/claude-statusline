@@ -2,7 +2,7 @@
 
 [![test](https://github.com/yawning5/claude-statusline/actions/workflows/test.yml/badge.svg)](https://github.com/yawning5/claude-statusline/actions/workflows/test.yml)
 
-A single-line status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
+A status line for [Claude Code](https://claude.com/claude-code). No dependencies, one file.
 
 ```
 ▌ ~/dir │ main │ Opus 5 (1M context) │ high │ @you │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
@@ -10,6 +10,17 @@ A single-line status line for [Claude Code](https://claude.com/claude-code). No 
 
 On a subscription the API-equivalent cost is not what constrains you, so this shows the
 **rate limit windows** instead — the 5-hour and 7-day usage — alongside context window use.
+
+On a terminal too narrow for all of that, it splits in two rather than letting the terminal
+wrap it wherever it likes — session identity on the first row, the numbers that move on the
+second:
+
+```
+▌ ~/dir │ main │ Opus 5 (1M context) │ high │ @you
+▌ ctx 5% │ 5h 29% (2h13m) │ 7d 1%
+```
+
+A line that fits is left on one row.
 
 ## Install
 
@@ -95,6 +106,9 @@ not on your `PATH` where Claude Code can see it.
 | `5h 29%` | 5-hour rate limit window used. |
 | `(2h13m)` | Time until that window resets. `6d3h`, `2h13m`, `47m`, `<1m`. Omitted if Claude Code does not report a reset time. |
 | `7d 1%` | 7-day rate limit window used. |
+
+The last three are the ones that drop to a second row when the line will not fit — see
+[Terminal compatibility](#terminal-compatibility).
 
 **The status line never runs git.** The branch name is read out of `.git/HEAD` — no
 subprocess, on any render. That is a deliberate trade: a dirty-tree marker and
@@ -214,6 +228,7 @@ Colour and glyphs adapt automatically, and can be forced:
 | `CLAUDE_STATUSLINE_STYLE=unicode` | Force the Unicode glyph set. |
 | `CLAUDE_STATUSLINE_TRUECOLOR=0` | Force 24-bit colour off, so the effort label stays 16-colour. |
 | `CLAUDE_STATUSLINE_TRUECOLOR=1` | Force 24-bit colour on. |
+| `COLUMNS` | Terminal width, used to decide whether to split into two rows. Claude Code sets it (v2.1.153+); unset means never split. |
 
 Glyphs default to Unicode when the locale (`LC_ALL`/`LC_CTYPE`/`LANG`) says UTF-8, or when
 `TERM_PROGRAM`/`WT_SESSION` is set — terminals that render UTF-8 fine but often leave the
@@ -232,7 +247,8 @@ terminal advertises support — `COLORTERM=truecolor`/`24bit`, `WT_SESSION`, or 
 Everywhere else both fall back to 16 colours. Nothing emits 256-colour escapes.
 
 Set these in your shell profile, not in the `statusLine` command — Claude Code runs the
-command through your shell, so the environment carries over.
+command through your shell, so the environment carries over. `COLUMNS` is the exception:
+Claude Code sets it for you, and overriding it just lies to the width check.
 
 ### One thing worth knowing if you fork this
 
@@ -246,11 +262,11 @@ terminal. `test/run.js` has a regression test for exactly this.
 node test/run.js
 ```
 
-55 checks covering percentage rounding, the reset countdown, path shortening, malformed
-input, every colour and glyph switch, and the git segment against real temporary
-repositories — nested subdirectories, worktrees where `.git` is a file, detached HEAD, a
-repo with no commits yet, and a render with git nowhere on `PATH`, plus the settings merge
-both installers share.
+118 checks covering percentage rounding, the reset countdown, path shortening, malformed
+input, every colour and glyph switch, the two-row split and the cell-width measurement
+behind it, and the git segment against real temporary repositories — nested subdirectories,
+worktrees where `.git` is a file, detached HEAD, a repo with no commits yet, and a render
+with git nowhere on `PATH`, plus the settings merge both installers share.
 
 Fixtures carry no absolute timestamps. Countdown cases build `resets_at` relative to the
 current time so they do not rot.
