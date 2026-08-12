@@ -3,6 +3,11 @@
 // Reads the session JSON on stdin, prints one line:
 //   ▌ ~/dir │ main │ Opus 5 │ high │ @you │ ctx 5% │ 5h 29% │ 7d 1%
 //
+// ...or two, when that will not fit the terminal. The usage numbers move down,
+// leaving the session's identity on the first row:
+//   ▌ ~/dir │ main │ Opus 5 │ high │ @you
+//   ▌ ctx 5% │ 5h 29% │ 7d 1%
+//
 // Spawns nothing. The branch name is read straight out of .git/HEAD, so a
 // render can never contend with the git commands you are typing yourself.
 //
@@ -11,6 +16,8 @@
 //   FORCE_COLOR=1|2|3                      keep colour regardless
 //   CLAUDE_STATUSLINE_STYLE=ascii|unicode  force the glyph set
 //   CLAUDE_STATUSLINE_TRUECOLOR=0|1        force 24-bit colour off or on
+//   COLUMNS                                terminal width, set by Claude Code;
+//                                          unset means never wrap
 'use strict';
 
 const fs = require('fs');
@@ -463,6 +470,64 @@ function ghUserSegment() {
   return C.dim('@') + sgr(TRUECOLOR ? fg(ACCOUNT.rgb) : String(ACCOUNT.ansi))(truncate(login, MAX_LOGIN));
 }
 
+// How wide the terminal is.
+//
+// Not process.stdout.columns, and not `tput cols`: Claude Code captures this
+// script's output through a pipe, so neither can see the terminal on the other
+// end of it. The width arrives out of band instead — Claude Code sets COLUMNS
+// (and LINES) to the current dimensions before running the command, as of
+// v2.1.153. Anything older simply does not set it, and returning null there
+// keeps the single long line those versions have always printed.
+function terminalColumns() {
+  const n = Number.parseInt(env.COLUMNS, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+const ANSI = /\x1b\[[0-9;]*m/g;
+
+// Characters that take two terminal cells: the East Asian Wide and Fullwidth
+// ranges, plus the emoji blocks. This matters because the widest thing on the
+// line is a path, and a Korean one — ~/프로젝트/서버 — occupies half again as
+// many cells as it has characters. Measuring it as if it were ASCII would let
+// the line overflow the terminal while this code believed it fit, which is the
+// exact failure the wrap exists to prevent.
+//
+// Ambiguous-width characters are counted as one. The │ separator is among them,
+// so a terminal explicitly configured to render CJK ambiguous characters double
+// width will wrap slightly later than it should. Counting them as two instead
+// would misjudge every other terminal, which is the commoner case by far.
+const WIDE = [
+  [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3],
+  [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60],
+  [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd],
+];
+
+// Characters that take none. The conjoining Hangul jamo are here for the same
+// reason the syllables are above: a decomposed (NFD) Korean path — what a macOS
+// filesystem hands over — stores each syllable as two or three code points that
+// the terminal composes into a single cell.
+const ZERO = [
+  [0x0300, 0x036f], [0x1160, 0x11ff], [0x200b, 0x200f], [0x20d0, 0x20ff],
+  [0xd7b0, 0xd7ff], [0xfe00, 0xfe0f],
+];
+
+const inRanges = (cp, ranges) => ranges.some(([lo, hi]) => cp >= lo && cp <= hi);
+
+// Cells a rendered line occupies, ignoring the colour escapes woven through it.
+// for..of walks code points rather than UTF-16 units, so an astral character is
+// measured once instead of twice for its two surrogate halves.
+function displayWidth(s) {
+  let w = 0;
+  for (const ch of s.replace(ANSI, '')) {
+    const cp = ch.codePointAt(0);
+    if (cp < 0x0300) { w += 1; continue; } // ASCII and Latin-1, no table lookup
+    if (inRanges(cp, ZERO)) continue;
+    w += inRanges(cp, WIDE) ? 2 : 1;
+  }
+  return w;
+}
+
 let raw = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => (raw += d));
@@ -488,8 +553,15 @@ process.stdin.on('end', () => {
   const ghUser = ghUserSegment();
   if (ghUser) parts.push(ghUser);
 
+  // Kept apart from the segments above because these are the ones that move to
+  // a second row when the line will not fit. The split falls here for a reason:
+  // everything above answers "which session is this", and stays put so the eye
+  // can find it in the same place every render; everything below is a number
+  // that changes on its own while you work.
+  const usage = [];
+
   const ctx = d.context_window && d.context_window.used_percentage;
-  if (typeof ctx === 'number') parts.push(byLoad(ctx, `ctx ${asPct(ctx)}%`));
+  if (typeof ctx === 'number') usage.push(byLoad(ctx, `ctx ${asPct(ctx)}%`));
 
   // On a subscription the API-equivalent cost is not billed, so show the rate
   // limit windows instead — those are the real constraint.
@@ -497,13 +569,22 @@ process.stdin.on('end', () => {
   const five = limits.five_hour && limits.five_hour.used_percentage;
   if (typeof five === 'number') {
     const left = untilReset(limits.five_hour.resets_at);
-    parts.push(byLoad(five, `5h ${asPct(five)}%` + (left ? ` (${left})` : '')));
+    usage.push(byLoad(five, `5h ${asPct(five)}%` + (left ? ` (${left})` : '')));
   }
 
   const week = limits.seven_day && limits.seven_day.used_percentage;
-  if (typeof week === 'number') parts.push(byLoad(week, `7d ${asPct(week)}%`));
+  if (typeof week === 'number') usage.push(byLoad(week, `7d ${asPct(week)}%`));
 
-  process.stdout.write(C.dim(GLYPH.lead + ' ') + parts.join(C.dim(GLYPH.sep)));
+  const line = (segs) => C.dim(GLYPH.lead + ' ') + segs.join(C.dim(GLYPH.sep));
+  const oneLine = line(parts.concat(usage));
+
+  // Wrap only when the single line genuinely overflows. Splitting one that
+  // already fits would spend a terminal row to say nothing, and a width this
+  // cannot read is not a reason to guess.
+  const cols = terminalColumns();
+  const split = usage.length > 0 && cols !== null && displayWidth(oneLine) > cols;
+
+  process.stdout.write(split ? `${line(parts)}\n${line(usage)}` : oneLine);
 });
 
 // never let a status line error take down the render
