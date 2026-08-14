@@ -435,7 +435,9 @@ check('the signed-in github account is shown', () => {
   eq(withHosts('basic', HOSTS)[1], '@yawning5', 'account segment');
 });
 
-check('the account sits between effort and ctx', () => {
+check('the account closes the first row, ahead of the model', () => {
+  // It belongs to the same group as the path and the branch — whose checkout,
+  // and where — so it sits before the model rather than after the effort.
   const dir = path.join(TMP, 'gh-order');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'hosts.yml'), HOSTS);
@@ -443,9 +445,9 @@ check('the account sits between effort and ctx', () => {
     Object.assign({ effort: { level: 'high' } }, fixture('typical')),
     { GH_CONFIG_DIR: dir }
   ));
-  eq(s[1], 'Opus 5 (1M context)', 'model segment');
-  eq(s[2], 'high', 'effort segment');
-  eq(s[3], '@yawning5', 'account segment');
+  eq(s[1], '@yawning5', 'account segment');
+  eq(s[2], 'Opus 5 (1M context)', 'model segment');
+  eq(s[3], 'high', 'effort segment');
   eq(s[4], 'ctx 5%', 'context segment still follows');
 });
 
@@ -848,11 +850,26 @@ check('a line that fits stays on one row', () => {
   eq(wrapped(render(WRAPPABLE, { COLUMNS: '200' })), false, 'wrapped');
 });
 
-check('a line that overflows moves the usage segments to a second row', () => {
+check('a line that overflows moves the model, effort and usage to a second row', () => {
+  // Only the segments that grow with what you named things stay put: the path,
+  // the branch, the account. Everything of a fixed width gives way.
   const r = rows(render(WRAPPABLE, { COLUMNS: '40' }));
   eq(r.length, 2, 'row count');
-  eq(r[0].join('|'), '/srv/api|Opus 5 (1M context)|high', 'first row');
-  eq(r[1].join('|'), 'ctx 5%|5h 29%|7d 1%', 'second row');
+  eq(r[0].join('|'), '/srv/api', 'first row');
+  eq(r[1].join('|'), 'Opus 5 (1M context)|high|ctx 5%|5h 29%|7d 1%', 'second row');
+});
+
+check('the model moves down even with no usage figures to move with it', () => {
+  // The case the grouping exists for: a deep worktree path and a long branch
+  // name, and a payload carrying no context or rate-limit numbers at all. The
+  // model has to come down on its own here, or it is simply lost off the end.
+  const r = rows(render(
+    { workspace: { current_dir: '/srv/api' }, model: { display_name: 'Opus 5 (1M context)' } },
+    { COLUMNS: '20' }
+  ));
+  eq(r.length, 2, 'row count');
+  eq(r[0].join('|'), '/srv/api', 'first row');
+  eq(r[1].join('|'), 'Opus 5 (1M context)', 'second row');
 });
 
 check('both rows carry the lead glyph', () => {
