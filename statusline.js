@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Claude Code status line.
 // Reads the session JSON on stdin, prints one line:
-//   ▌ ~/dir │ main │ Opus 5 │ high │ @you │ ctx 5% │ 5h 29% │ 7d 1%
+//   ▌ ~/dir │ main │ @you │ Opus 5 │ high │ ctx 5% │ 5h 29% │ 7d 1%
 //
-// ...or two, when that will not fit the terminal. The usage numbers move down,
-// leaving the session's identity on the first row:
-//   ▌ ~/dir │ main │ Opus 5 │ high │ @you
-//   ▌ ctx 5% │ 5h 29% │ 7d 1%
+// ...or two, when that will not fit the terminal. The model, the effort level
+// and the usage numbers move down, leaving where you are on the first row:
+//   ▌ ~/dir │ main │ @you
+//   ▌ Opus 5 │ high │ ctx 5% │ 5h 29% │ 7d 1%
 //
 // Spawns nothing. The branch name is read straight out of .git/HEAD, so a
 // render can never contend with the git commands you are typing yourself.
@@ -536,32 +536,41 @@ process.stdin.on('end', () => {
   try { d = JSON.parse(raw); } catch {}
 
   const cwd = (d.workspace && d.workspace.current_dir) || d.cwd || process.cwd();
-  const parts = [C.dir(shortenPath(cwd))];
+
+  // Row one: where you are. These are the segments whose width is set by what
+  // you named things — a worktree directory, a branch called after a ticket —
+  // so they are the ones that can grow without bound, and they are also what
+  // tells one terminal window apart from another. They keep the first row.
+  const place = [C.dir(shortenPath(cwd))];
 
   const branch = branchSegment(cwd);
-  if (branch) parts.push(branch);
+  if (branch) place.push(branch);
 
-  if (d.model && d.model.display_name) parts.push(C.magenta(d.model.display_name));
+  // Which account the push would go out as. Not derived from the payload —
+  // Claude Code does not report it — so it comes off disk. It stays up here
+  // because it answers the same question the path and the branch do: whose
+  // checkout is this, and where.
+  const ghUser = ghUserSegment();
+  if (ghUser) place.push(ghUser);
+
+  // Row two, when there is one. Kept apart from the segments above because
+  // these are the ones that move down when the line will not fit, and the
+  // split falls here for a reason: every segment below is a fixed width the
+  // moment you know its value, so none of them is ever what pushed the line
+  // over. Letting them give way to the unbounded ones costs a row and keeps
+  // them all readable; the other way round, a deep worktree path plus a long
+  // branch name shoved the model straight off the end of the terminal.
+  const state = [];
+
+  if (d.model && d.model.display_name) state.push(C.magenta(d.model.display_name));
 
   // Beside the model, because the two are read together: which model, and how
   // hard it is being asked to think.
   const effort = effortSegment(d);
-  if (effort) parts.push(effort);
-
-  // Which account the push would go out as. Not derived from the payload —
-  // Claude Code does not report it — so it comes off disk.
-  const ghUser = ghUserSegment();
-  if (ghUser) parts.push(ghUser);
-
-  // Kept apart from the segments above because these are the ones that move to
-  // a second row when the line will not fit. The split falls here for a reason:
-  // everything above answers "which session is this", and stays put so the eye
-  // can find it in the same place every render; everything below is a number
-  // that changes on its own while you work.
-  const usage = [];
+  if (effort) state.push(effort);
 
   const ctx = d.context_window && d.context_window.used_percentage;
-  if (typeof ctx === 'number') usage.push(byLoad(ctx, `ctx ${asPct(ctx)}%`));
+  if (typeof ctx === 'number') state.push(byLoad(ctx, `ctx ${asPct(ctx)}%`));
 
   // On a subscription the API-equivalent cost is not billed, so show the rate
   // limit windows instead — those are the real constraint.
@@ -569,22 +578,26 @@ process.stdin.on('end', () => {
   const five = limits.five_hour && limits.five_hour.used_percentage;
   if (typeof five === 'number') {
     const left = untilReset(limits.five_hour.resets_at);
-    usage.push(byLoad(five, `5h ${asPct(five)}%` + (left ? ` (${left})` : '')));
+    state.push(byLoad(five, `5h ${asPct(five)}%` + (left ? ` (${left})` : '')));
   }
 
   const week = limits.seven_day && limits.seven_day.used_percentage;
-  if (typeof week === 'number') usage.push(byLoad(week, `7d ${asPct(week)}%`));
+  if (typeof week === 'number') state.push(byLoad(week, `7d ${asPct(week)}%`));
 
   const line = (segs) => C.dim(GLYPH.lead + ' ') + segs.join(C.dim(GLYPH.sep));
-  const oneLine = line(parts.concat(usage));
+  const oneLine = line(place.concat(state));
 
   // Wrap only when the single line genuinely overflows. Splitting one that
   // already fits would spend a terminal row to say nothing, and a width this
   // cannot read is not a reason to guess.
+  //
+  // The emptiness guard is on the second row rather than on the usage figures
+  // alone: a session with no rate limits in its payload still has a model, and
+  // that model is exactly what a long path used to push out of sight.
   const cols = terminalColumns();
-  const split = usage.length > 0 && cols !== null && displayWidth(oneLine) > cols;
+  const split = state.length > 0 && cols !== null && displayWidth(oneLine) > cols;
 
-  process.stdout.write(split ? `${line(parts)}\n${line(usage)}` : oneLine);
+  process.stdout.write(split ? `${line(place)}\n${line(state)}` : oneLine);
 });
 
 // never let a status line error take down the render
