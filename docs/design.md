@@ -237,7 +237,7 @@ unset. `CLAUDE_STATUSLINE_STYLE` overrides the detection in either direction.
 
 ## Two rows
 
-The line outgrew narrow terminals. Directory, branch, model, effort, account and three
+The line outgrew narrow terminals. Directory, branch, account, model, effort and three
 usage figures come to something like 110 cells with a long model name, and Claude Code's own
 advice for output past the width is that it "may get truncated or wrap awkwardly" — the
 wrap point falling wherever the terminal happens to put it, mid-segment as often as not.
@@ -245,14 +245,24 @@ wrap point falling wherever the terminal happens to put it, mid-segment as often
 So it splits itself, on a seam chosen rather than found:
 
 ```
-▌ ~/dir │ main │ Opus 5 (1M context) │ high │ @you     which session is this
-▌ ctx 5% │ 5h 29% (2h13m) │ 7d 1%                      what it has spent
+▌ ~/dir │ main │ @you                                           where you are
+▌ Opus 5 (1M context) │ high │ ctx 5% │ 5h 29% (2h13m) │ 7d 1%  what is running, and what is left
 ```
 
-Everything above the seam answers *which session is this*, and holds still — the eye learns
-where the branch name sits and keeps finding it there. Everything below is a number that
-moves on its own while you work. Splitting anywhere else would put two halves of one thought
-on two rows.
+**The seam is drawn where the widths are.** Above it are the segments whose width is set by
+what you named things — a worktree directory, a branch called after a ticket — and nothing
+bounds those. Below it, every segment is a fixed width the moment its value is known: a
+model name, a level, a percentage. So the segments that can push the line over are never the
+ones that give way, and the ones that hold still are also what tells one terminal window
+from another.
+
+The first cut drew it somewhere else — session identity above, the numbers that move on
+their own below — which reads well and failed in use. A worktree path plus a long branch
+name pushed the model clean off the end of the terminal, and the model is the segment you
+least want to lose to the segment you already know by heart. It failed twice over, in fact:
+the split was gated on there being usage figures to move down, so a payload carrying no rate
+limits did not wrap at all — nothing to move, model gone anyway. That guard now asks whether
+the second row would have anything on it, which the model alone satisfies.
 
 **Only when it does not fit.** A line that fits stays on one row; spending a second row to
 say the same thing is a real cost in a terminal.
