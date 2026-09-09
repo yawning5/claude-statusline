@@ -25,12 +25,16 @@ fi
 mkdir -p "$CONFIG_DIR"
 [ -f "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
 
-BACKUP="$SETTINGS.backup.$(date +%Y%m%d%H%M%S)"
-cp "$SETTINGS" "$BACKUP"
-
-node "$REPO_DIR/merge-settings.js" "$SETTINGS" "$SCRIPT"
+# The backup belongs to merge-settings.js — it is the only code that knows whether
+# anything actually changed, and a backup of an unchanged file is just litter.
+# It prints the backup path, or `unchanged` when it wrote nothing.
+BACKUP="$(node "$REPO_DIR/merge-settings.js" "$SETTINGS" "$SCRIPT")"
 
 echo "statusLine -> $SCRIPT"
-echo "backup     -> $BACKUP"
+if [ "$BACKUP" = unchanged ]; then
+  echo "backup     -> not needed (settings already point here)"
+else
+  echo "backup     -> $BACKUP"
+fi
 echo
 echo "Open a new Claude Code session, or run /statusline, to pick it up."

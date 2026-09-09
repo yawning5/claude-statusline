@@ -29,20 +29,24 @@ if (-not (Test-Path -LiteralPath $settings)) {
     Set-Content -LiteralPath $settings -Value '{}' -Encoding utf8
 }
 
-$backup = "$settings.backup.$(Get-Date -Format 'yyyyMMddHHmmss')"
-Copy-Item -LiteralPath $settings -Destination $backup
-
 # Forward slashes in an otherwise Windows-shaped path (C:/Users/...). Claude Code
 # may run the command through cmd.exe, which cannot resolve the /c/Users/... form
 # a POSIX shell would hand it, and backslashes would need escaping in JSON.
 $scriptPath = (Resolve-Path -LiteralPath $statusline).Path.Replace('\', '/')
 
-node $merge $settings $scriptPath
+# The backup belongs to merge-settings.js -- it is the only code that knows whether
+# anything actually changed, and a backup of an unchanged file is just litter.
+# It prints the backup path, or `unchanged` when it wrote nothing.
+$backup = (node $merge $settings $scriptPath | Select-Object -Last 1)
 if ($LASTEXITCODE -ne 0) {
-    throw "merge-settings.js failed; settings.json is untouched (copy at $backup)"
+    throw "merge-settings.js failed; settings.json is untouched"
 }
 
 Write-Host "statusLine -> $scriptPath"
-Write-Host "backup     -> $backup"
+if ($backup -eq 'unchanged') {
+    Write-Host "backup     -> not needed (settings already point here)"
+} else {
+    Write-Host "backup     -> $backup"
+}
 Write-Host ''
 Write-Host 'Open a new Claude Code session, or run /statusline, to pick it up.'
