@@ -61,7 +61,12 @@ git clone https://github.com/yawning5/claude-statusline.git $HOME\claude-statusl
 & $HOME\claude-statusline\install.ps1
 ```
 
-If PowerShell refuses to run it, the execution policy is blocking local scripts:
+If PowerShell refuses with *"is not digitally signed"*, look at where the file is before
+touching the execution policy. The default `RemoteSigned` never blocks a local script — it
+only demands a signature for a path Windows maps to the Internet zone, and
+`\\wsl.localhost\<distro>\...` is such a path. That is the alias File Explorer shows by
+default; `\\wsl$\<distro>\...` is the same files over an Intranet-zone alias and runs fine.
+So clone to `$HOME` as above, or bypass the policy for that one run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File $HOME\claude-statusline\install.ps1
