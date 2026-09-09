@@ -97,6 +97,37 @@ echo '{}' | node ~/claude-statusline/statusline.js
 That should print a status line for your current directory. If it prints nothing, Node is
 not on your `PATH` where Claude Code can see it.
 
+### When it looks wrong
+
+**This prints one row, or two. Nothing else on screen is its output.** In a terminal
+multiplexer the rows around it belong to other programs — a pane-border label drawn by the
+multiplexer, and Claude Code's own hint row underneath. When something near the status line
+looks broken, settle which program drew it before reading any further:
+
+```sh
+printf '%s' '{"workspace":{"current_dir":"'"$PWD"'"},"model":{"display_name":"Opus 5"},
+  "context_window":{"used_percentage":5},"rate_limits":{"five_hour":{"used_percentage":29}}}' \
+  | COLUMNS=120 node ~/claude-statusline/statusline.js | sed 's/\x1b\[[0-9;]*m//g'
+```
+
+Compare that against the screen. Anything on screen that is not in this output came from
+somewhere else.
+
+**Only the branch is computed here.** The path, the account, the model, the effort level and
+every percentage arrive in the payload Claude Code hands over — if one of those is wrong, it
+is wrong before this script sees it, and the command above will show the same wrong value
+for the input you gave it. The branch is the one field read from disk (`.git/HEAD`, following
+the `gitdir:` pointer when the checkout is a worktree).
+
+**It redraws only when Claude Code asks it to.** There is no timer. In a quiet session the
+countdown beside the 5-hour figure keeps showing the value from the last render, which reads
+as a stale clock rather than a wrong one.
+
+**A line that wraps when it looked like it would fit** is the ambiguous-width case: the `│`
+separator is charged one cell, and a terminal configured to draw CJK ambiguous characters
+double width disagrees. Set `CLAUDE_STATUSLINE_STYLE=ascii` to use `|` instead, which is
+unambiguous everywhere.
+
 ## What each segment means
 
 | Segment | Meaning |
