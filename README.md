@@ -37,16 +37,19 @@ bash ~/claude-statusline/install.sh
 
 Then start a new Claude Code session, or run `/statusline`, to pick it up.
 
-`install.sh` merges the `statusLine` key into `~/.claude/settings.json` and backs the file
-up first. Your other settings — theme, model, plugins — are left alone.
+`install.sh` merges the `statusLine` key into `~/.claude/settings.json`, backing the file up
+first **only when the merge actually changes something** — re-running it after nothing has
+moved writes no backup and no file. Your other settings — theme, model, plugins — are left
+alone, and the three most recent backups are kept.
 
 Run it with `bash` rather than `./install.sh`: downloading a ZIP or uploading through the
-GitHub web UI drops the executable bit, and `bash` works either way. If you would rather
-have it back:
+GitHub web UI drops the executable bit, and `bash` works either way.
 
-```sh
-chmod +x ~/claude-statusline/install.sh ~/claude-statusline/statusline.js
-```
+Do not `chmod +x` the checkout to get around that. Git tracks the executable bit, so the
+mode change shows up as a permanent modification with zero changed lines, and tooling that
+refuses to pull a dirty repository will quietly stop updating this one. `statusline.js` never
+needs the bit — Claude Code invokes it as `node statusline.js`. If a checkout is already
+dirty this way, `git -C ~/claude-statusline checkout .` puts the modes back.
 
 ### Windows
 

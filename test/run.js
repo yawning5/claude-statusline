@@ -1133,6 +1133,56 @@ check('the merge keeps unrelated settings, nesting and all', () => {
   eq(json.hooks.PreToolUse[0].matcher, 'Bash', 'hook matcher');
 });
 
+// The installers used to take a timestamped backup on every run, unconditionally.
+// Most runs change nothing — a setup runner re-runs the installer on each update —
+// so ~/.claude/ filled with snapshots nobody asked for (issue #8). The backup now
+// belongs to the merge, which is the only code that knows whether anything changed.
+
+function backupsOf(file) {
+  const dir = path.dirname(file);
+  const base = path.basename(file);
+  return fs.readdirSync(dir).filter((f) => f.startsWith(`${base}.backup.`)).sort();
+}
+
+check('a merge that changes nothing writes no backup', () => {
+  const { file, out } = mergeInto(JSON.stringify(EXISTING), 'merge-noop-1');
+  eq(backupsOf(file).length, 1, 'first run backs up');
+  const again = execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  eq(backupsOf(file).length, 1, 'second run adds no backup');
+  eq(again.trim(), 'unchanged', 'second run reports unchanged');
+  if (out.trim() === 'unchanged') throw new Error('first run should not report unchanged');
+});
+
+check('backups are capped at the three most recent', () => {
+  const file = path.join(TMP, 'merge-cap.json');
+  fs.writeFileSync(file, '{}');
+  const kept = [];
+  for (let i = 0; i < 5; i++) {
+    // a different script path each round, so every run is a real change
+    kept.push(execFileSync(process.execPath, [MERGE, file, `/repo/v${i}.js`], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim());
+  }
+  eq(backupsOf(file).length, 3, 'backup count');
+  // The newest three, not any three: the most recent pre-change state is the one
+  // worth restoring. Five runs inside one second is what a script does, and it is
+  // exactly where a name-based scheme can start dropping the wrong end.
+  const survivors = backupsOf(file).map((f) => path.join(TMP, f)).sort();
+  eq(survivors.join('\n'), kept.slice(-3).sort().join('\n'), 'the three kept are the last three written');
+});
+
+check('the backup holds the settings as they were before the merge', () => {
+  const file = path.join(TMP, 'merge-content.json');
+  fs.writeFileSync(file, '{"theme":"dark"}\n');
+  const out = execFileSync(process.execPath, [MERGE, file, '/repo/statusline.js'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  eq(fs.readFileSync(out, 'utf8'), '{"theme":"dark"}\n', 'backup contents');
+  eq(JSON.parse(fs.readFileSync(file, 'utf8')).theme, 'dark', 'merged file keeps theme');
+});
+
 check('the merge replaces an existing statusLine', () => {
   const { json } = mergeInto(JSON.stringify(EXISTING), 'merge-replace');
   eq(json.statusLine.command, 'node "/repo/statusline.js"', 'statusLine command');
