@@ -140,6 +140,7 @@ unambiguous everywhere.
 
 | Segment | Meaning |
 |---|---|
+| `🐧` / `🪟` | Which side of the machine the session runs on: WSL or native Windows. `WSL` / `WIN` in the ASCII glyph set. Omitted on plain Linux and macOS. |
 | `~/dir` | Working directory. Deep paths collapse to `root/…/parent/dir`. |
 | `main` | Git branch, read from `.git/HEAD`. Omitted outside a repo. Detached HEAD shows the short commit id. |
 | `@you` | GitHub account signed in to the GitHub CLI. Omitted if `gh` is absent or logged out. |
@@ -150,7 +151,7 @@ unambiguous everywhere.
 | `(2h13m)` | Time until that window resets. `6d3h`, `2h13m`, `47m`, `<1m`. Omitted if Claude Code does not report a reset time. |
 | `7d 1%` | 7-day rate limit window used. |
 
-The first three hold the first row. Everything after them drops to a second row when the
+The badge, the path, the branch and the account hold the first row. Everything after them drops to a second row when the
 line will not fit — see [Terminal compatibility](#terminal-compatibility).
 
 **The status line never runs git.** The branch name is read out of `.git/HEAD` — no
@@ -269,6 +270,8 @@ Colour and glyphs adapt automatically, and can be forced:
 | `TERM=dumb` | Drop colour. |
 | `CLAUDE_STATUSLINE_STYLE=ascii` | Force the ASCII glyph set. |
 | `CLAUDE_STATUSLINE_STYLE=unicode` | Force the Unicode glyph set. |
+| `CLAUDE_STATUSLINE_OS=wsl\|windows` | Force the WSL or Windows badge instead of detecting it. |
+| `CLAUDE_STATUSLINE_OS=none` | Hide the badge. |
 | `CLAUDE_STATUSLINE_TRUECOLOR=0` | Force 24-bit colour off, so the effort label stays 16-colour. |
 | `CLAUDE_STATUSLINE_TRUECOLOR=1` | Force 24-bit colour on. |
 | `COLUMNS` | Terminal width, used to decide whether to split into two rows. Claude Code sets it (v2.1.153+); unset means never split. |
