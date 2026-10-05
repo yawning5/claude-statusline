@@ -50,6 +50,11 @@ function render(payload, extraEnv) {
       // about 24-bit colour turn it on explicitly.
       CLAUDE_STATUSLINE_TRUECOLOR: '0',
       GH_CONFIG_DIR: path.join(TMP, 'no-gh'),
+      // Pinned off for the same reason: the badge leads the first row on WSL and
+      // on Windows and is absent everywhere else, so it would shift every segment
+      // index on exactly the machines the suite is most often run on. The OS
+      // badge cases turn it back on.
+      CLAUDE_STATUSLINE_OS: 'none',
       // Unset for the same reason: with a width in hand the script may wrap to
       // two rows, and every segment-index assertion below reads the first one.
       // The wrapping cases set it explicitly.
@@ -949,6 +954,84 @@ check('a decomposed hangul path measures like its composed form', () => {
 
   eq(wrapped(render(nfd, { COLUMNS: String(chars) })), true, 'wrapped like the composed form');
   eq(wrapped(render(nfd, { COLUMNS: String(chars + 6) })), false, 'wrapped six cells wider');
+});
+
+// --- OS badge ---------------------------------------------------------------
+
+// Renders with the suite's pin lifted and the WSL variables cleared, so each
+// case supplies exactly the signals it is about.
+const osRender = (extraEnv, payload) => render(
+  payload || { workspace: { current_dir: '/srv/api' } },
+  Object.assign({ CLAUDE_STATUSLINE_OS: undefined, WSL_DISTRO_NAME: undefined, WSL_INTEROP: undefined }, extraEnv)
+);
+
+const WSL_KERNEL = (() => {
+  try {
+    return /microsoft/i.test(fs.readFileSync('/proc/sys/kernel/osrelease', 'utf8'));
+  } catch {
+    return false;
+  }
+})();
+
+check('the badge leads the first row', () => {
+  const s = segments(osRender({ CLAUDE_STATUSLINE_OS: 'wsl' }));
+  eq(s[0], '🐧', 'badge');
+  eq(s[1], '/srv/api', 'path follows it');
+});
+
+check('windows has a badge of its own', () => {
+  eq(segments(osRender({ CLAUDE_STATUSLINE_OS: 'windows' }))[0], '🪟', 'badge');
+});
+
+check('the ascii glyph set spells the badge out', () => {
+  const ascii = { CLAUDE_STATUSLINE_STYLE: 'ascii' };
+  eq(segments(osRender(Object.assign({ CLAUDE_STATUSLINE_OS: 'wsl' }, ascii)))[0], 'WSL', 'wsl');
+  eq(segments(osRender(Object.assign({ CLAUDE_STATUSLINE_OS: 'windows' }, ascii)))[0], 'WIN', 'windows');
+});
+
+check('none, or a value it does not know, hides the badge', () => {
+  for (const value of ['none', 'NONE', 'beos']) {
+    eq(segments(osRender({ CLAUDE_STATUSLINE_OS: value })).join('|'), '/srv/api', `CLAUDE_STATUSLINE_OS=${value}`);
+  }
+});
+
+check('WSL_DISTRO_NAME is read as WSL on linux', () => {
+  if (process.platform !== 'linux') return; // the variable means nothing elsewhere
+  eq(segments(osRender({ WSL_DISTRO_NAME: 'Ubuntu' }))[0], '🐧', 'badge');
+});
+
+check('WSL_INTEROP alone is enough', () => {
+  if (process.platform !== 'linux') return;
+  eq(segments(osRender({ WSL_INTEROP: '/run/WSL/1_interop' }))[0], '🐧', 'badge');
+});
+
+check('native windows is detected from the platform', () => {
+  if (process.platform !== 'win32') return;
+  eq(segments(osRender({}))[0], '🪟', 'badge');
+});
+
+check('without the variables linux follows its kernel, and macOS shows nothing', () => {
+  if (process.platform === 'win32') return;
+  const expected = process.platform === 'linux' && WSL_KERNEL ? '🐧|/srv/api' : '/srv/api';
+  eq(segments(osRender({})).join('|'), expected, 'segments');
+});
+
+check('the badge stays on the first row when the line splits', () => {
+  const r = rows(osRender({ CLAUDE_STATUSLINE_OS: 'wsl', COLUMNS: '40' }, WRAPPABLE));
+  eq(r.length, 2, 'row count');
+  eq(r[0].join('|'), '🐧|/srv/api', 'first row');
+});
+
+check('both badges are measured as the two cells they draw', () => {
+  // 🪟 lives in U+1FA70–1FAFF, a block the wide table once lacked. Counted as
+  // one cell it let a line that overflowed by exactly one stay on a single row.
+  for (const kind of ['wsl', 'windows']) {
+    const os = { CLAUDE_STATUSLINE_OS: kind };
+    // Code points plus one: the badge is the only double-width character here.
+    const cells = [...stripAnsi(osRender(Object.assign({ COLUMNS: undefined }, os), WRAPPABLE))].length + 1;
+    eq(wrapped(osRender(Object.assign({ COLUMNS: String(cells) }, os), WRAPPABLE)), false, `${kind} at its width`);
+    eq(wrapped(osRender(Object.assign({ COLUMNS: String(cells - 1) }, os), WRAPPABLE)), true, `${kind} one cell short`);
+  }
 });
 
 // --- git segment ------------------------------------------------------------

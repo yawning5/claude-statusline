@@ -219,6 +219,28 @@ happened to sort first, and there is a test pinning that.
 with no `hosts.yml` for every render that did not ask for an account. Without that, the
 suite would pass or fail depending on whether whoever runs it is logged into gh.
 
+## OS badge
+
+One machine running Claude Code both natively on Windows and inside WSL renders this same
+script on both sides, and the two lines looked identical: same account, same model, and a
+home directory of the same name. The badge leading the first row — `🐧` for WSL, `🪟` for
+Windows — is there to answer "which side am I on" before anything else.
+
+Detection spawns nothing. `process.platform` settles Windows. On Linux, WSL sets
+`WSL_DISTRO_NAME` and `WSL_INTEROP` in the environment it starts, and a shell that lost
+them on the way (`env -i`, `sudo`) still runs a kernel whose release string names Microsoft,
+read from `/proc/sys/kernel/osrelease`. Plain Linux and macOS get no badge: there is no
+other side to mistake them for.
+
+`🪟` sits in U+1FA70–1FAFF, a block the wide-character table did not cover. Measured as one
+cell while the terminal draws two, a line one cell too long stayed on a single row; the
+block was added to the table and a test pins it.
+
+`test/run.js` sets `CLAUDE_STATUSLINE_OS=none` for every render, the way it pins
+`GH_CONFIG_DIR`: the badge appears on WSL and Windows and nowhere else, so without the pin
+every segment-index assertion would fail on exactly the machines the suite is most often run
+on, and pass on CI.
+
 ## Terminal handling
 
 **Colour is on by default and disabled only on an explicit signal** (`NO_COLOR`,

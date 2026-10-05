@@ -15,6 +15,7 @@
 //   NO_COLOR / FORCE_COLOR=0 / TERM=dumb   drop colour
 //   FORCE_COLOR=1|2|3                      keep colour regardless
 //   CLAUDE_STATUSLINE_STYLE=ascii|unicode  force the glyph set
+//   CLAUDE_STATUSLINE_OS=wsl|windows|none  force the WSL/Windows badge, or hide it
 //   CLAUDE_STATUSLINE_TRUECOLOR=0|1        force 24-bit colour off or on
 //   COLUMNS                                terminal width, set by Claude Code;
 //                                          unset means never wrap
@@ -64,8 +65,8 @@ const COLOR = colorEnabled();
 const TRUECOLOR = COLOR && truecolorEnabled();
 
 const GLYPH = unicodeEnabled()
-  ? { lead: '▌', sep: ' │ ', ellipsis: '…' }
-  : { lead: '|', sep: ' | ', ellipsis: '...' };
+  ? { lead: '▌', sep: ' │ ', ellipsis: '…', wsl: '🐧', windows: '🪟' }
+  : { lead: '|', sep: ' | ', ellipsis: '...', wsl: 'WSL', windows: 'WIN' };
 
 // 16-colour ANSI only — the one palette every terminal agrees on.
 const sgr = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -470,6 +471,35 @@ function ghUserSegment() {
   return C.dim('@') + sgr(TRUECOLOR ? fg(ACCOUNT.rgb) : String(ACCOUNT.ansi))(truncate(login, MAX_LOGIN));
 }
 
+// Which side of a Windows machine this session is on. The same script renders
+// for native Windows and for WSL, and with the same account, the same model and
+// a home directory of the same name on both, the two are otherwise easy to
+// mistake for each other.
+//
+// Nothing is spawned. WSL announces itself in the environment it starts
+// (WSL_DISTRO_NAME, WSL_INTEROP), and its kernel names Microsoft in its release
+// string for a shell that dropped those variables on the way (env -i, sudo).
+function osKind() {
+  const forced = (env.CLAUDE_STATUSLINE_OS || '').toLowerCase();
+  if (forced) return forced;
+  if (process.platform === 'win32') return 'windows';
+  if (process.platform !== 'linux') return null;
+  if (env.WSL_DISTRO_NAME || env.WSL_INTEROP) return 'wsl';
+  try {
+    return /microsoft/i.test(fs.readFileSync('/proc/sys/kernel/osrelease', 'utf8')) ? 'wsl' : null;
+  } catch {
+    return null;
+  }
+}
+
+// Plain Linux and macOS get no badge: there is no other side to confuse them with.
+function osSegment() {
+  const kind = osKind();
+  if (kind === 'wsl') return GLYPH.wsl;
+  if (kind === 'windows') return GLYPH.windows;
+  return null;
+}
+
 // How wide the terminal is.
 //
 // Not process.stdout.columns, and not `tput cols`: Claude Code captures this
@@ -500,7 +530,8 @@ const WIDE = [
   [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf],
   [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3],
   [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60],
-  [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd],
+  [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x1fa70, 0x1faff],
+  [0x20000, 0x3fffd],
 ];
 
 // Characters that take none. The conjoining Hangul jamo are here for the same
@@ -541,7 +572,13 @@ process.stdin.on('end', () => {
   // you named things — a worktree directory, a branch called after a ticket —
   // so they are the ones that can grow without bound, and they are also what
   // tells one terminal window apart from another. They keep the first row.
-  const place = [C.dir(shortenPath(cwd))];
+  const place = [];
+
+  // Leads the row: which side of the machine comes before where on it.
+  const badge = osSegment();
+  if (badge) place.push(badge);
+
+  place.push(C.dir(shortenPath(cwd)));
 
   const branch = branchSegment(cwd);
   if (branch) place.push(branch);
